@@ -1,27 +1,34 @@
 services:
-  mongodb:
+  converseai-db:
     image: mongo:latest
-    container_name: mongodb
-    ports:
-      - "27017:27017"
+    container_name: converseai-db
+    networks:
+      - converseai-net
     volumes:
-      - mongodb_data:/data/db
+      - converseai_db_data:/data/db
+    # Removed host port mapping to avoid conflicts and improve security
 
-  web:
+  converseai:
     build: .
-    container_name: ai-chat-app
+    container_name: converseai
     ports:
-      - "8080:8080"
+      - "${HOST_PORT_APP:-8080}:8080"
     environment:
       - PORT=8080
-      - MONGO_URI=mongodb://mongodb:27017
-      - DB_NAME=ai_chat
-      - JWT_SECRET=your-secret-key-change-me
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - MONGO_URI=${MONGO_URI:-mongodb://converseai-db:27017}
+      - DB_NAME=${DB_NAME:-ai_chat}
+      - JWT_SECRET=${JWT_SECRET}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - converseai-net
     depends_on:
-      - mongodb
+      - converseai-db
+
+networks:
+  converseai-net:
+    driver: bridge
 
 volumes:
-  mongodb_data:
+  converseai_db_data:
