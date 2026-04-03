@@ -33,10 +33,10 @@ export const createConversationApi = async (title: string, modelConfigId?: strin
   const response = await fetch('/api/chat/conversations/create', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 
-      title, 
+    body: JSON.stringify({
+      title,
       model_config_id: modelConfigId,
-      model_name: modelName 
+      model_name: modelName
     }),
   });
   if (!response.ok) throw new Error('Failed to create conversation');
@@ -74,7 +74,7 @@ export const streamCompletionApi = async (
     });
 
     if (!response.ok) {
-        throw new Error(await response.text() || 'Failed to start stream');
+      throw new Error(await response.text() || 'Failed to start stream');
     }
 
     const reader = response.body?.getReader();
@@ -91,34 +91,34 @@ export const streamCompletionApi = async (
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
 
-        let currentEvent = 'message';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
+      let currentEvent = 'message';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
 
-          if (trimmed.startsWith('event: ')) {
-            currentEvent = trimmed.substring(7);
-            continue;
-          }
-
-          if (trimmed.startsWith('data: ')) {
-            const data = trimmed.substring(6);
-            if (data === '[DONE]') {
-              onEnd();
-              return;
-            }
-            if (currentEvent === 'thought') {
-              onThought(data);
-            } else if (currentEvent === 'error') {
-              onError(data);
-              return; // Stop stream on error
-            } else {
-              onChunk(data);
-            }
-            // Reset event for next chunk unless explicit event tag
-            if (currentEvent !== 'message') currentEvent = 'message';
-          }
+        if (trimmed.startsWith('event: ')) {
+          currentEvent = trimmed.substring(7);
+          continue;
         }
+
+        if (trimmed.startsWith('data: ')) {
+          const data = trimmed.substring(6);
+          if (data === '[DONE]') {
+            onEnd();
+            return;
+          }
+          if (currentEvent === 'thought') {
+            onThought(data);
+          } else if (currentEvent === 'error') {
+            onError(data);
+            return; // Stop stream on error
+          } else {
+            onChunk(data);
+          }
+          // Reset event for next chunk unless explicit event tag
+          if (currentEvent !== 'message') currentEvent = 'message';
+        }
+      }
     }
   } catch (err: any) {
     onError(err.message || 'Stream error');

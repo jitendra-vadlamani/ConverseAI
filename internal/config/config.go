@@ -15,8 +15,8 @@ func LoadConfig() *Config {
 	return &Config{
 		Port:      getEnv("PORT", "8080"),
 		MongoURI:  getEnv("MONGO_URI", "mongodb://localhost:27017"),
-		DBName:    getEnv("DB_NAME", "ai_chat"),
-		JWTSecret: getEnv("JWT_SECRET", "super-secret-random-key-change-me"),
+		DBName:    getEnv("DB_NAME", "converseai-db"),
+		JWTSecret: getEnv("JWT_SECRET", "converseai"),
 	}
 }
 

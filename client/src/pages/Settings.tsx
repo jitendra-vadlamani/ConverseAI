@@ -42,6 +42,7 @@ export const Settings: React.FC = () => {
     base_url: '',
     api_key: '',
     description: '',
+    context_window: 4096,
   });
 
   const fetchModels = async () => {
@@ -90,7 +91,7 @@ export const Settings: React.FC = () => {
     try {
       await addLLMApi(newModel as LLMConfig);
       setShowAddForm(false);
-      setNewModel({ provider: 'openai', name: '', model_name: '', base_url: '', api_key: '', description: '' });
+      setNewModel({ provider: 'openai', name: '', model_name: '', base_url: '', api_key: '', description: '', context_window: 4096 });
       fetchModels();
     } catch (err: any) {
       setError(err.message || 'Failed to add model');
@@ -194,12 +195,22 @@ export const Settings: React.FC = () => {
                   </div>
                   <div className="form-row">
                     <div className="form-group">
-                      <label>Model ID</label>
+                      <label>Model Identifier</label>
                       <input type="text" value={newModel.model_name} onChange={(e) => setNewModel({...newModel, model_name: e.target.value})} placeholder="e.g. gpt-4" required />
                     </div>
                     <div className="form-group" style={{ flex: 2 }}>
                       <label>Base URL (Optional)</label>
                       <input type="text" value={newModel.base_url} onChange={(e) => setNewModel({...newModel, base_url: e.target.value})} placeholder="https://api.openai.com/v1" />
+                    </div>
+                  </div>
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Context Window</label>
+                      <input type="number" value={newModel.context_window || 4096} onChange={(e) => setNewModel({...newModel, context_window: parseInt(e.target.value) || 0})} placeholder="e.g. 4096" />
+                    </div>
+                    <div className="form-group" style={{ flex: 2 }}>
+                      <label>Description (Optional)</label>
+                      <input type="text" value={newModel.description} onChange={(e) => setNewModel({...newModel, description: e.target.value})} placeholder="Briefly describe this model..." />
                     </div>
                   </div>
                   <div className="form-group">

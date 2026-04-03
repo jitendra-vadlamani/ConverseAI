@@ -4,14 +4,14 @@ import remarkGfm from 'remark-gfm';
 import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Hash } from 'lucide-react';
 import { getEncoding } from 'js-tiktoken';
 import { listLLMsApi, type LLMInfo } from '../api/llm';
-import { 
-  listConversationsApi, 
-  getConversationApi, 
-  createConversationApi, 
-  deleteConversationApi, 
+import {
+  listConversationsApi,
+  getConversationApi,
+  createConversationApi,
+  deleteConversationApi,
   streamCompletionApi,
   type Conversation,
-  type Message 
+  type Message
 } from '../api/chat';
 import { Link } from 'react-router-dom';
 
@@ -61,7 +61,7 @@ export const Chat: React.FC = () => {
       setConversations(convs || []);
       setLLMs(models || []);
       if (models && models.length > 0) {
-        setSelectedModelId(models[0].config.id || '');
+        setSelectedModelId(models[0].config.id || models[0].config.name);
       }
     } catch (err) {
       console.error('Failed to fetch initial data:', err);
@@ -110,7 +110,7 @@ export const Chat: React.FC = () => {
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
-    const selectedModel = llms.find(m => m.config.id === selectedModelId || (!m.config.id && selectedModelId === ''));
+    const selectedModel = llms.find(m => (m.config.id || m.config.name) === selectedModelId);
     if (selectedModel && selectedModel.status !== 'Online') {
       alert(`The selected model is currently ${selectedModel.status}. Please select an Online model.`);
       return;
@@ -196,8 +196,8 @@ export const Chat: React.FC = () => {
         </button>
         <div className="conversations-list">
           {conversations.map(conv => (
-            <div 
-              key={conv.id} 
+            <div
+              key={conv.id}
               className={`conversation-item ${currentConversation?.id === conv.id ? 'active' : ''}`}
               onClick={() => loadConversation(conv.id)}
             >
@@ -211,7 +211,7 @@ export const Chat: React.FC = () => {
         </div>
         <div className="sidebar-footer">
           <Link to="/settings" className="sidebar-settings-link">
-             <SettingsIcon size={16} /> Manage Models
+            <SettingsIcon size={16} /> Manage Models
           </Link>
         </div>
       </aside>
@@ -229,20 +229,20 @@ export const Chat: React.FC = () => {
         ) : !currentConversation ? (
           <div className="welcome-container">
             <header className="chat-header">
-                <div className="model-selector">
-                  <span className="model-label">Using:</span>
-                  <select 
-                    value={selectedModelId} 
-                    onChange={(e) => setSelectedModelId(e.target.value)}
-                  >
-                    {llms.map(llm => (
-                      <option key={llm.config.id || llm.config.model_name} value={llm.config.id || ''}>
-                        {llm.config.name} ({llm.status})
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown size={14} className="selector-icon" />
-               </div>
+              <div className="model-selector">
+                <span className="model-label">Using:</span>
+                <select
+                  value={selectedModelId}
+                  onChange={(e) => setSelectedModelId(e.target.value)}
+                >
+                  {llms.map(llm => (
+                    <option key={llm.config.id || llm.config.name} value={llm.config.id || llm.config.name}>
+                      {llm.config.name} ({llm.status})
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown size={14} className="selector-icon" />
+              </div>
             </header>
             <div className="welcome-content">
               <h1>ConverseAI</h1>
@@ -263,8 +263,8 @@ export const Chat: React.FC = () => {
                   placeholder="Message ConverseAI..."
                   className="chat-textarea"
                 />
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   className={`send-btn ${input.trim() || loading ? 'active' : ''}`}
                   onClick={loading ? handleStop : handleSend}
                   title={loading ? 'Stop Generating' : 'Send Message'}
@@ -277,21 +277,21 @@ export const Chat: React.FC = () => {
         ) : (
           <>
             <header className="chat-header">
-               <div className="model-selector">
-                  <span className="model-label">Using:</span>
-                  <select 
-                    value={selectedModelId} 
-                    onChange={(e) => setSelectedModelId(e.target.value)}
-                    disabled={loading || !!currentConversation}
-                  >
-                    {llms.map(llm => (
-                      <option key={llm.config.id} value={llm.config.id}>
-                        {llm.config.name} ({llm.config.model_name})
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown size={14} className="selector-icon" />
-               </div>
+              <div className="model-selector">
+                <span className="model-label">Using:</span>
+                <select
+                  value={selectedModelId}
+                  onChange={(e) => setSelectedModelId(e.target.value)}
+                  disabled={loading || !!currentConversation}
+                >
+                  {llms.map(llm => (
+                    <option key={llm.config.id || llm.config.name} value={llm.config.id || llm.config.name}>
+                      {llm.config.name} ({llm.config.model_name})
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown size={14} className="selector-icon" />
+              </div>
             </header>
 
             <div className="messages-container">
@@ -343,14 +343,14 @@ export const Chat: React.FC = () => {
 
               {loading && !streamingContent && !streamingThought && (
                 <div className="loading-message">
-                   <Loader2 className="animate-spin" size={20} /> 
-                   <span>{selectedModelId ? 'Preparing response...' : 'Generating...'}</span>
+                  <Loader2 className="animate-spin" size={20} />
+                  <span>{selectedModelId ? 'Preparing response...' : 'Generating...'}</span>
                 </div>
               )}
               {loading && streamingThought && !streamingContent && (
                 <div className="loading-message">
-                   <Loader2 className="animate-spin" size={20} /> 
-                   <span>Thinking...</span>
+                  <Loader2 className="animate-spin" size={20} />
+                  <span>Thinking...</span>
                 </div>
               )}
               <div ref={messagesEndRef} />
@@ -359,49 +359,49 @@ export const Chat: React.FC = () => {
             <footer className="chat-input-area">
               <div className="input-container-wrapper">
                 {(() => {
-                    const selectedModel = llms.find(m => m.config.id === selectedModelId || (!m.config.id && selectedModelId === ''));
-                    const used = currentConversation?.total_tokens || 0;
-                    const max = selectedModel?.config.context_window || 2048;
-                    const remaining = max - used;
-                    
-                    return currentConversation && (
-                      <div className="chat-context-indicator" title={`Max: ${max} tokens | Remaining: ${remaining} tokens`}>
-                        <Hash size={12} />
-                        <span>{used} / {max} tokens used ({Math.max(0, remaining)} remaining)</span>
-                      </div>
-                    );
-                  })()}
+                  const selectedModel = llms.find(m => (m.config.id || m.config.name) === selectedModelId);
+                  const used = currentConversation?.total_tokens || 0;
+                  const max = selectedModel?.config.context_window || 2048;
+                  const remaining = max - used;
+
+                  return currentConversation && (
+                    <div className="chat-context-indicator" title={`Max: ${max} tokens | Remaining: ${remaining} tokens`}>
+                      <Hash size={12} />
+                      <span>{used} / {max} tokens used ({Math.max(0, remaining)} remaining)</span>
+                    </div>
+                  );
+                })()}
                 <div className="input-container">
-                <textarea
-                  rows={1}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  placeholder="Message ConverseAI..."
-                  className="chat-textarea"
-                />
-                <div className="input-actions-wrapper">
-                  {input.length > 0 && (
-                    <span className="live-token-counter">
-                      {tokenCount} tokens
-                    </span>
-                  )}
-                  <button 
-                    className={`send-btn ${input.trim() && !loading ? 'active' : ''}`}
-                    onClick={handleSend}
-                    disabled={!input.trim() || loading}
-                  >
-                    {loading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
-                  </button>
+                  <textarea
+                    rows={1}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
+                    placeholder="Message ConverseAI..."
+                    className="chat-textarea"
+                  />
+                  <div className="input-actions-wrapper">
+                    {input.length > 0 && (
+                      <span className="live-token-counter">
+                        {tokenCount} tokens
+                      </span>
+                    )}
+                    <button
+                      className={`send-btn ${input.trim() && !loading ? 'active' : ''}`}
+                      onClick={handleSend}
+                      disabled={!input.trim() || loading}
+                    >
+                      {loading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-            <p className="input-footer">ConverseAI can make mistakes. Check important info.</p>
+              <p className="input-footer">ConverseAI can make mistakes. Check important info.</p>
             </footer>
           </>
         )}
