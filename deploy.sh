@@ -10,6 +10,7 @@ fi
 
 # Set defaults if not provided in .env
 HOST_PORT_APP=${HOST_PORT_APP:-8080}
+HOST_PORT_DB=${HOST_PORT_DB:-27018}
 MONGO_URI=${MONGO_URI:-mongodb://converseai-db:27017}
 DB_NAME=${DB_NAME:-ai_chat}
 JWT_SECRET=${JWT_SECRET:-your-secret-key}
@@ -22,9 +23,12 @@ docker network create converseai-net 2>/dev/null || true
 
 # 2. Start Database
 echo "📦 Starting Database (converseai-db)..."
+docker stop converseai-db 2>/dev/null || true
+docker rm converseai-db 2>/dev/null || true
 docker run -d \
     --name converseai-db \
     --network converseai-net \
+    -p $HOST_PORT_DB:27017 \
     -v converseai_db_data:/data/db \
     --restart always \
     mongo:latest
