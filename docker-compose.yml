@@ -17,6 +17,9 @@ services:
       - MONGO_URI=mongodb://mongodb:27017
       - DB_NAME=ai_chat
       - JWT_SECRET=your-secret-key-change-me
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - mongodb
 

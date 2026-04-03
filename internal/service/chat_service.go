@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -89,10 +90,14 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	}
 
 	if llmConfig == nil && conv.ModelName != "" {
+		baseURL := os.Getenv("OLLAMA_BASE_URL")
+		if baseURL == "" {
+			baseURL = "http://localhost:11434"
+		}
 		llmConfig = &model.LLMConfig{
 			Provider:  model.ProviderOllama,
 			ModelName: conv.ModelName,
-			BaseURL:   "http://localhost:11434",
+			BaseURL:   baseURL,
 		}
 	}
 

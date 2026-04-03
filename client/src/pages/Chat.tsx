@@ -58,9 +58,9 @@ export const Chat: React.FC = () => {
         listConversationsApi(),
         listLLMsApi()
       ]);
-      setConversations(convs);
-      setLLMs(models);
-      if (models.length > 0) {
+      setConversations(convs || []);
+      setLLMs(models || []);
+      if (models && models.length > 0) {
         setSelectedModelId(models[0].config.id || '');
       }
     } catch (err) {
@@ -217,7 +217,7 @@ export const Chat: React.FC = () => {
       </aside>
 
       <main className="chat-main">
-        {llms.length === 0 ? (
+        {(!llms || llms.length === 0) ? (
           <div className="empty-state-full">
             <Brain size={48} className="empty-icon" />
             <h3>No Models Configured</h3>

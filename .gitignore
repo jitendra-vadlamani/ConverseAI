@@ -1,0 +1,15 @@
+# Go
+ai-chat-app
+ai-chat-app.exe
+*.exe
+*.test
+*.prof
+
+# React
+client/dist
+client/node_modules
+.DS_Store
+
+# ENV
+.env
+.env.local

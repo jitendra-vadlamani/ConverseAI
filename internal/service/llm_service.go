@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -66,7 +67,10 @@ func (s *llmService) ListModels(ctx context.Context, userID string) ([]*model.LL
 }
 
 func (s *llmService) discoverLocalOllamaModels() []*model.LLMInfo {
-	baseURL := "http://localhost:11434"
+	baseURL := os.Getenv("OLLAMA_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
 	url := fmt.Sprintf("%s/api/tags", baseURL)
 	
 	resp, err := s.httpClient.Get(url)
@@ -161,7 +165,10 @@ func (s *llmService) checkModelStatus(cfg *model.LLMConfig) string {
 
 func (s *llmService) checkOllamaModelStatus(baseURL, modelName string) string {
 	if baseURL == "" {
-		baseURL = "http://localhost:11434"
+		baseURL = os.Getenv("OLLAMA_BASE_URL")
+		if baseURL == "" {
+			baseURL = "http://localhost:11434"
+		}
 	}
 	url := fmt.Sprintf("%s/api/tags", baseURL)
 	
