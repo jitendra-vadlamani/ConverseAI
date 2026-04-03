@@ -152,14 +152,14 @@ export const Chat: React.FC = () => {
         (chunk) => {
           setStreamingContent((prev) => prev + chunk);
         },
-        () => {
+        async () => {
+          if (conv?.id) {
+            await loadConversation(conv.id);
+          }
           setLoading(false);
           setStreamingContent('');
           setStreamingThought('');
           setAbortController(null);
-          if (conv?.id) {
-            loadConversation(conv.id);
-          }
           fetchInitialData();
         },
         (err) => {
@@ -295,6 +295,12 @@ export const Chat: React.FC = () => {
             </header>
 
             <div className="messages-container">
+              {currentConversation.summary && (
+                <div className="summary-banner">
+                  <Brain size={16} />
+                  <span>Long-term memory active: {currentConversation.summary_token_count} tokens condensed into a summary.</span>
+                </div>
+              )}
               {currentConversation.messages.map((msg, i) => (
                 <div key={i} className={`message-wrapper ${msg.role}`}>
                   <div className="message-content">
@@ -306,11 +312,16 @@ export const Chat: React.FC = () => {
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {msg.content}
                       </ReactMarkdown>
-                      {msg.token_count !== undefined && msg.token_count > 0 && (
-                        <div className="message-token-count">
-                          {msg.token_count} tokens
-                        </div>
-                      )}
+                      <div className="message-meta-row">
+                        {msg.is_summarized && (
+                          <span className="summarized-tag">Summarized</span>
+                        )}
+                        {msg.token_count !== undefined && msg.token_count > 0 && (
+                          <div className="message-token-count">
+                            {msg.token_count} tokens
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -439,7 +450,10 @@ export const Chat: React.FC = () => {
         .send-btn { background: #e2e8f0; color: #94a3b8; border: none; padding: 0.5rem; border-radius: 0.375rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; }
         .send-btn.active { background: #6366f1; color: white; }
         .send-btn.active:hover { background: #4f46e5; transform: scale(1.05); }
-        .message-token-count { font-size: 0.65rem; color: #94a3b8; margin-top: 0.25rem; font-weight: 500; text-align: right; }
+        .message-token-count { font-size: 0.65rem; color: #94a3b8; font-weight: 500; }
+        .message-meta-row { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem; }
+        .summarized-tag { font-size: 0.6rem; color: #6366f1; background: #eef2ff; padding: 0.1rem 0.3rem; border-radius: 0.25rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.025em; }
+        .summary-banner { max-width: 850px; margin: 0 auto 1rem; padding: 0.75rem 1rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 0.75rem; display: flex; align-items: center; gap: 0.75rem; font-size: 0.8125rem; color: #475569; }
         .total-tokens-badge { display: none; }
         .input-footer { text-align: center; font-size: 0.6875rem; color: #94a3b8; margin-top: 0.5rem; }
 

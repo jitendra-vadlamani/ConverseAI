@@ -5,6 +5,7 @@ export interface Message {
   content: string;
   reasoning?: string;
   token_count?: number;
+  is_summarized?: boolean;
   created_at?: string;
 }
 
@@ -16,6 +17,8 @@ export interface Conversation {
   model_name?: string;
   messages: Message[];
   total_tokens?: number;
+  summary?: string;
+  summary_token_count?: number;
   created_at: string;
   updated_at: string;
 }

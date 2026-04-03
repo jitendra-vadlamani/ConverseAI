@@ -109,8 +109,35 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		TokenCount: userTokenCount,
 		CreatedAt:  time.Now(),
 	}
-	if err := s.repo.AddMessage(tCtx, conv.ID, userMsg); err != nil {
+
+	// Use independent context for saving to ensure it completes even if request is cancelled
+	userSaveCtx, userSaveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer userSaveCancel()
+
+	if err := s.repo.AddMessage(userSaveCtx, conv.ID, userMsg); err != nil {
+		log.Printf("[ChatService] ERROR adding user message: %v", err)
 		return err
+	}
+
+	// 2. Check for Summarization Need
+	maxContext := 2048
+	if llmConfig.ContextWindow > 0 {
+		maxContext = llmConfig.ContextWindow
+	}
+
+	// Trigger summarization if the CURRENT context (including new prompt) exceeds 90% of the limit
+	if conv.TotalTokens+userTokenCount > int(float64(maxContext)*0.9) {
+		log.Printf("[ChatService] Triggering summarization (Used: %d, New: %d, Limit: %d)", conv.TotalTokens, userTokenCount, maxContext)
+		if err := s.triggerSummarization(tCtx, llmConfig, conv); err != nil {
+			log.Printf("[ChatService] WARNING: Summarization failed: %v", err)
+		} else {
+			// Reload conversation to get the new summary and is_summarized flags
+			conv, _ = s.repo.GetConversationByID(tCtx, conv.ID)
+		}
+	} else {
+		// Even if not summarizing, we need to add the NEW user message to the local conv object
+		// because we already saved it to the DB but the 'conv' object was loaded before that.
+		conv.Messages = append(conv.Messages, userMsg)
 	}
 
 	isThinking := false
@@ -170,12 +197,18 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		CreatedAt:  time.Now(),
 	}
 	
-	if err := s.repo.AddMessage(tCtx, conv.ID, aiMsg); err != nil {
+	// Use Background context for saving to ensure it completes even if request is cancelled
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer saveCancel()
+
+	if err := s.repo.AddMessage(saveCtx, conv.ID, aiMsg); err != nil {
+		log.Printf("[ChatService] ERROR adding assistant message: %v", err)
 		return err
 	}
 
 	// 4. Update Conversation Total Tokens
-	return s.repo.UpdateTotalTokens(tCtx, conv.ID, userTokenCount+aiTokenCount)
+	log.Printf("[ChatService] Saving Assistant message (%d tokens) for convo %s. Sample: %.20s...", aiTokenCount, conversationID, fullAIResponse)
+	return s.repo.UpdateTotalTokens(saveCtx, conv.ID, userTokenCount+aiTokenCount)
 }
 
 func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, newContent string, onChunk func(string)) error {
@@ -192,16 +225,21 @@ func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, c
 func (s *chatService) streamOllama(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, content string, onChunk func(string)) error {
 	url := cfg.BaseURL + "/api/chat"
 	
-	messages := []map[string]string{}
-	for _, m := range conv.Messages {
-		messages = append(messages, map[string]string{"role": string(m.Role), "content": m.Content})
+	messages := s.prepareMessages(conv)
+
+	// Ensure we have a sane default for context window if it's somehow 0
+	ctxWindow := cfg.ContextWindow
+	if ctxWindow == 0 {
+		ctxWindow = 2048
 	}
-	messages = append(messages, map[string]string{"role": "user", "content": content})
 
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"model":    cfg.ModelName,
 		"messages": messages,
 		"stream":   true,
+		"options": map[string]interface{}{
+			"num_ctx": ctxWindow,
+		},
 	})
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
@@ -244,11 +282,7 @@ func (s *chatService) streamOpenAI(ctx context.Context, cfg *model.LLMConfig, co
 		url = "https://api.openai.com/v1/chat/completions"
 	}
 
-	messages := []map[string]string{}
-	for _, m := range conv.Messages {
-		messages = append(messages, map[string]string{"role": string(m.Role), "content": m.Content})
-	}
-	messages = append(messages, map[string]string{"role": "user", "content": content})
+	messages := s.prepareMessages(conv)
 
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"model":    cfg.ModelName,
@@ -308,4 +342,94 @@ func (s *chatService) streamOpenAI(ctx context.Context, cfg *model.LLMConfig, co
 		}
 	}
 	return nil
+}
+func (s *chatService) prepareMessages(conv *model.Conversation) []map[string]string {
+	messages := []map[string]string{}
+
+	// 1. Add Summary if exists
+	if conv.Summary != "" {
+		messages = append(messages, map[string]string{
+			"role":    "assistant",
+			"content": "Context Summary of previous conversation parts: " + conv.Summary,
+		})
+	}
+
+	// 2. Add unsummarized messages
+	// Note: The latest prompt is already in conv.Messages by the time this is called
+	for _, m := range conv.Messages {
+		if !m.IsSummarized {
+			messages = append(messages, map[string]string{"role": string(m.Role), "content": m.Content})
+		}
+	}
+
+	return messages
+}
+
+func (s *chatService) triggerSummarization(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation) error {
+	url := cfg.BaseURL + "/api/chat"
+	if cfg.Provider == model.ProviderOpenAI {
+		url = cfg.BaseURL + "/v1/chat/completions"
+	}
+
+	historyText := ""
+	for _, m := range conv.Messages {
+		historyText += fmt.Sprintf("%s: %s\n", m.Role, m.Content)
+	}
+
+	prompt := fmt.Sprintf("Summarize the following conversation history for long-term memory. Be concise but cover all key points. Do NOT include any other text, just the summary itself.\n\nCONVERSATION:\n%s", historyText)
+
+	payload := map[string]interface{}{
+		"model":  cfg.ModelName,
+		"stream": false,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+	}
+
+	reqBody, _ := json.Marshal(payload)
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	summary := result.Message.Content
+	if len(result.Choices) > 0 {
+		summary = result.Choices[0].Message.Content
+	}
+
+	if summary == "" {
+		return fmt.Errorf("empty summary received")
+	}
+
+	// Persist summary and flag messages
+	summaryTokens := util.CountTokens(summary)
+	if err := s.repo.UpdateSummary(ctx, conv.ID, summary, summaryTokens); err != nil {
+		return err
+	}
+
+	if err := s.repo.MarkMessagesAsSummarized(ctx, conv.ID); err != nil {
+		return err
+	}
+
+	// Recalculate total tokens: Summary + any message NOT summarized (though usually we summarize all)
+	// For now, assume all were summarized.
+	return s.repo.UpdateTotalTokens(ctx, conv.ID, -(conv.TotalTokens - summaryTokens))
 }

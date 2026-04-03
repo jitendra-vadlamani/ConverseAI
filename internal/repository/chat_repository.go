@@ -18,6 +18,8 @@ type ChatRepository interface {
 	GetConversationsByUserID(ctx context.Context, userID primitive.ObjectID) ([]*model.Conversation, error)
 	AddMessage(ctx context.Context, conversationID primitive.ObjectID, message model.Message) error
 	UpdateTotalTokens(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
+	UpdateSummary(ctx context.Context, conversationID primitive.ObjectID, summary string, tokens int) error
+	MarkMessagesAsSummarized(ctx context.Context, conversationID primitive.ObjectID) error
 	DeleteConversation(ctx context.Context, id primitive.ObjectID) error
 }
 
@@ -94,6 +96,35 @@ func (r *MongoChatRepository) UpdateTotalTokens(ctx context.Context, id primitiv
 	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
 	if err != nil {
 		return fmt.Errorf("failed to update total tokens: %w", err)
+	}
+	return nil
+}
+
+func (r *MongoChatRepository) UpdateSummary(ctx context.Context, id primitive.ObjectID, summary string, tokens int) error {
+	update := bson.M{
+		"$set": bson.M{
+			"summary":             summary,
+			"summary_token_count": tokens,
+			"updated_at":          time.Now(),
+		},
+	}
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
+		return fmt.Errorf("failed to update summary: %w", err)
+	}
+	return nil
+}
+
+func (r *MongoChatRepository) MarkMessagesAsSummarized(ctx context.Context, id primitive.ObjectID) error {
+	update := bson.M{
+		"$set": bson.M{
+			"messages.$[].is_summarized": true,
+			"updated_at":                 time.Now(),
+		},
+	}
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
+		return fmt.Errorf("failed to mark messages as summarized: %w", err)
 	}
 	return nil
 }
