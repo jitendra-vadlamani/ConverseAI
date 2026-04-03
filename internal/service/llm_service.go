@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"ai-chat/internal/model"
@@ -49,6 +50,11 @@ func (s *llmService) ListModels(ctx context.Context, userID string) ([]*model.LL
 
 	for _, c := range configs {
 		status := s.checkModelStatus(c)
+		// If context window is missing in DB config, try to fetch it live
+		if c.ContextWindow == 0 && c.Provider == model.ProviderOllama {
+			c.ContextWindow = s.fetchOllamaModelDetails(c.BaseURL, c.ModelName)
+		}
+		
 		allModels = append(allModels, &model.LLMInfo{
 			Config:   *c,
 			Status:   status,
@@ -80,18 +86,63 @@ func (s *llmService) discoverLocalOllamaModels() []*model.LLMInfo {
 
 	var infos []*model.LLMInfo
 	for _, m := range tags.Models {
+		ctxWindow := s.fetchOllamaModelDetails(baseURL, m.Name)
 		infos = append(infos, &model.LLMInfo{
 			Config: model.LLMConfig{
-				Name:      m.Name,
-				Provider:  model.ProviderOllama,
-				ModelName: m.Name,
-				BaseURL:   baseURL,
+				Name:          m.Name,
+				Provider:      model.ProviderOllama,
+				ModelName:     m.Name,
+				BaseURL:       baseURL,
+				ContextWindow: ctxWindow,
 			},
 			Status:   "Online",
 			IsSystem: true, // Marked as system because it's auto-discovered
 		})
 	}
 	return infos
+}
+
+func (s *llmService) fetchOllamaModelDetails(baseURL, modelName string) int {
+	url := fmt.Sprintf("%s/api/show", baseURL)
+	body, _ := json.Marshal(map[string]string{"name": modelName})
+	
+	resp, err := s.httpClient.Post(url, "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return 2048 // Fallback to default
+	}
+	defer resp.Body.Close()
+
+	var details struct {
+		Parameters string `json:"parameters"`
+		ModelInfo  map[string]interface{} `json:"model_info"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+		return 2048
+	}
+
+	// 1. Try model_info (modern Ollama)
+	if ctx, ok := details.ModelInfo["llama.context_length"].(float64); ok {
+		return int(ctx)
+	}
+
+	// 2. Try parsing parameters string (older Ollama)
+	if strings.Contains(details.Parameters, "num_ctx") {
+		lines := strings.Split(details.Parameters, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "num_ctx") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					var val int
+					fmt.Sscanf(fields[1], "%d", &val)
+					if val > 0 {
+						return val
+					}
+				}
+			}
+		}
+	}
+
+	return 2048 // Default
 }
 
 func (s *llmService) checkModelStatus(cfg *model.LLMConfig) string {

@@ -6,6 +6,7 @@ export interface LLMConfig {
   base_url?: string;
   api_key?: string;
   description?: string;
+  context_window?: number;
 }
 
 export interface LLMInfo {

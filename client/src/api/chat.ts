@@ -4,6 +4,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   reasoning?: string;
+  token_count?: number;
   created_at?: string;
 }
 
@@ -14,6 +15,7 @@ export interface Conversation {
   model_config_id?: string;
   model_name?: string;
   messages: Message[];
+  total_tokens?: number;
   created_at: string;
   updated_at: string;
 }

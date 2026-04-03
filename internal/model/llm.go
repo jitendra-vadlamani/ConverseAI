@@ -23,13 +23,14 @@ type LLMConfig struct {
 	ModelName   string             `bson:"model_name" json:"model_name"`
 	BaseURL     string             `bson:"base_url,omitempty" json:"base_url,omitempty"`
 	APIKey      string             `bson:"api_key,omitempty" json:"api_key,omitempty"`
-	Description string             `bson:"description,omitempty" json:"description,omitempty"`
-	CreatedAt   time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt   time.Time          `bson:"updated_at" json:"updated_at"`
+	Description   string             `bson:"description,omitempty" json:"description,omitempty"`
+	ContextWindow int                `bson:"context_window" json:"context_window"`
+	CreatedAt     time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt     time.Time          `bson:"updated_at" json:"updated_at"`
 }
 
 type LLMInfo struct {
-	Config   LLMConfig `json:"config"`
-	Status   string    `json:"status"` // "online", "offline"
-	IsSystem bool      `json:"is_system"`
+	Config        LLMConfig `json:"config"`
+	Status        string    `json:"status"` // "online", "offline"
+	IsSystem      bool      `json:"is_system"`
 }

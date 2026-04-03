@@ -14,6 +14,7 @@ import (
 
 	"ai-chat/internal/model"
 	"ai-chat/internal/repository"
+	"ai-chat/internal/util"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -101,7 +102,13 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	}
 
 	// 1. Save User Message
-	userMsg := model.Message{Role: model.RoleUser, Content: prompt, CreatedAt: time.Now()}
+	userTokenCount := util.CountTokens(prompt)
+	userMsg := model.Message{
+		Role:       model.RoleUser,
+		Content:    prompt,
+		TokenCount: userTokenCount,
+		CreatedAt:  time.Now(),
+	}
 	if err := s.repo.AddMessage(tCtx, conv.ID, userMsg); err != nil {
 		return err
 	}
@@ -153,14 +160,22 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		return err
 	}
 
-	// 3. Save AI Assistant Message with Reasoning
+	// 3. Save AI Assistant Message with Reasoning and Token Count
+	aiTokenCount := util.CountTokens(fullAIResponse + fullReasoning)
 	aiMsg := model.Message{
-		Role:      model.RoleAssistant,
-		Content:   fullAIResponse,
-		Reasoning: fullReasoning,
-		CreatedAt: time.Now(),
+		Role:       model.RoleAssistant,
+		Content:    fullAIResponse,
+		Reasoning:  fullReasoning,
+		TokenCount: aiTokenCount,
+		CreatedAt:  time.Now(),
 	}
-	return s.repo.AddMessage(tCtx, conv.ID, aiMsg)
+	
+	if err := s.repo.AddMessage(tCtx, conv.ID, aiMsg); err != nil {
+		return err
+	}
+
+	// 4. Update Conversation Total Tokens
+	return s.repo.UpdateTotalTokens(tCtx, conv.ID, userTokenCount+aiTokenCount)
 }
 
 func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, newContent string, onChunk func(string)) error {

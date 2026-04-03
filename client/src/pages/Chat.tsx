@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain } from 'lucide-react';
+import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Hash } from 'lucide-react';
+import { getEncoding } from 'js-tiktoken';
 import { listLLMsApi, type LLMInfo } from '../api/llm';
 import { 
   listConversationsApi, 
@@ -39,7 +40,13 @@ export const Chat: React.FC = () => {
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingThought, setStreamingThought] = useState('');
   const [abortController, setAbortController] = useState<AbortController | null>(null);
+  const [tokenCount, setTokenCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const enc = useRef(getEncoding('cl100k_base'));
+
+  useEffect(() => {
+    setTokenCount(enc.current.encode(input).length);
+  }, [input]);
 
   useEffect(() => {
     fetchInitialData();
@@ -222,7 +229,7 @@ export const Chat: React.FC = () => {
         ) : !currentConversation ? (
           <div className="welcome-container">
             <header className="chat-header">
-               <div className="model-selector">
+                <div className="model-selector">
                   <span className="model-label">Using:</span>
                   <select 
                     value={selectedModelId} 
@@ -299,6 +306,11 @@ export const Chat: React.FC = () => {
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {msg.content}
                       </ReactMarkdown>
+                      {msg.token_count !== undefined && msg.token_count > 0 && (
+                        <div className="message-token-count">
+                          {msg.token_count} tokens
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -334,7 +346,21 @@ export const Chat: React.FC = () => {
             </div>
 
             <footer className="chat-input-area">
-              <div className="input-container">
+              <div className="input-container-wrapper">
+                {(() => {
+                    const selectedModel = llms.find(m => m.config.id === selectedModelId || (!m.config.id && selectedModelId === ''));
+                    const used = currentConversation?.total_tokens || 0;
+                    const max = selectedModel?.config.context_window || 2048;
+                    const remaining = max - used;
+                    
+                    return currentConversation && (
+                      <div className="chat-context-indicator" title={`Max: ${max} tokens | Remaining: ${remaining} tokens`}>
+                        <Hash size={12} />
+                        <span>{used} / {max} tokens used ({Math.max(0, remaining)} remaining)</span>
+                      </div>
+                    );
+                  })()}
+                <div className="input-container">
                 <textarea
                   rows={1}
                   value={input}
@@ -348,15 +374,23 @@ export const Chat: React.FC = () => {
                   placeholder="Message ConverseAI..."
                   className="chat-textarea"
                 />
-                <button 
-                  className={`send-btn ${input.trim() && !loading ? 'active' : ''}`}
-                  onClick={handleSend}
-                  disabled={!input.trim() || loading}
-                >
-                  {loading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
-                </button>
+                <div className="input-actions-wrapper">
+                  {input.length > 0 && (
+                    <span className="live-token-counter">
+                      {tokenCount} tokens
+                    </span>
+                  )}
+                  <button 
+                    className={`send-btn ${input.trim() && !loading ? 'active' : ''}`}
+                    onClick={handleSend}
+                    disabled={!input.trim() || loading}
+                  >
+                    {loading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+                  </button>
+                </div>
               </div>
-              <p className="input-footer">ConverseAI can make mistakes. Check important info.</p>
+            </div>
+            <p className="input-footer">ConverseAI can make mistakes. Check important info.</p>
             </footer>
           </>
         )}
@@ -395,12 +429,18 @@ export const Chat: React.FC = () => {
         .message-text p:last-child { margin-bottom: 0; }
         .message-text pre { margin: 0.75rem 0; }
 
-        .chat-input-area { padding: 0.75rem 1.5rem; background: white; border-top: 1px solid transparent; }
-        .input-container { max-width: 850px; margin: 0 auto; background: white; border: 1px solid #d1d5db; border-radius: 0.75rem; padding: 0.5rem; display: flex; align-items: flex-end; gap: 0.5rem; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
+        .chat-input-area { padding: 0.5rem 1.5rem 0.75rem; background: white; border-top: 1px solid transparent; }
+        .input-container-wrapper { max-width: 850px; margin: 0 auto; display: flex; flex-direction: column; gap: 0.375rem; }
+        .chat-context-indicator { display: flex; align-items: center; gap: 0.375rem; font-size: 0.6875rem; color: #64748b; font-weight: 500; padding: 0 0.5rem; }
+        .input-container { background: white; border: 1px solid #d1d5db; border-radius: 0.75rem; padding: 0.5rem; display: flex; align-items: flex-end; gap: 0.5rem; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
         .chat-textarea { flex: 1; border: none; resize: none; padding: 0.25rem; font-size: 1rem; line-height: 1.5; outline: none; max-height: 200px; }
+        .input-actions-wrapper { display: flex; align-items: center; gap: 0.5rem; }
+        .live-token-counter { font-size: 0.7rem; color: #94a3b8; font-weight: 500; font-family: monospace; }
         .send-btn { background: #e2e8f0; color: #94a3b8; border: none; padding: 0.5rem; border-radius: 0.375rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; }
         .send-btn.active { background: #6366f1; color: white; }
         .send-btn.active:hover { background: #4f46e5; transform: scale(1.05); }
+        .message-token-count { font-size: 0.65rem; color: #94a3b8; margin-top: 0.25rem; font-weight: 500; text-align: right; }
+        .total-tokens-badge { display: none; }
         .input-footer { text-align: center; font-size: 0.6875rem; color: #94a3b8; margin-top: 0.5rem; }
 
         .welcome-container { flex: 1; display: flex; flex-direction: column; }

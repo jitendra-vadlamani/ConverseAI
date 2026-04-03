@@ -17,6 +17,7 @@ type ChatRepository interface {
 	GetConversationByID(ctx context.Context, id primitive.ObjectID) (*model.Conversation, error)
 	GetConversationsByUserID(ctx context.Context, userID primitive.ObjectID) ([]*model.Conversation, error)
 	AddMessage(ctx context.Context, conversationID primitive.ObjectID, message model.Message) error
+	UpdateTotalTokens(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
 	DeleteConversation(ctx context.Context, id primitive.ObjectID) error
 }
 
@@ -81,6 +82,18 @@ func (r *MongoChatRepository) AddMessage(ctx context.Context, conversationID pri
 	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": conversationID}, update)
 	if err != nil {
 		return fmt.Errorf("failed to add message: %w", err)
+	}
+	return nil
+}
+
+func (r *MongoChatRepository) UpdateTotalTokens(ctx context.Context, id primitive.ObjectID, tokens int) error {
+	update := bson.M{
+		"$inc": bson.M{"total_tokens": tokens},
+		"$set": bson.M{"updated_at": time.Now()},
+	}
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
+		return fmt.Errorf("failed to update total tokens: %w", err)
 	}
 	return nil
 }
