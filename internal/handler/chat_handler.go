@@ -1,21 +1,26 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"ai-chat/internal/service"
+	"ai-chat/internal/storage"
 )
 
 type ChatHandler struct {
-	chatService service.ChatService
+	chatService    service.ChatService
+	storageService storage.StorageService
 }
 
-func NewChatHandler(chatService service.ChatService) *ChatHandler {
+func NewChatHandler(chatService service.ChatService, storageService storage.StorageService) *ChatHandler {
 	return &ChatHandler{
-		chatService: chatService,
+		chatService:    chatService,
+		storageService: storageService,
 	}
 }
 
@@ -98,25 +103,65 @@ func (h *ChatHandler) CreateConversation(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// 1. Set headers for SSE
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// 2. Decode initial request
-	var req struct {
-		ConversationID string `json:"conversation_id"`
-		Content        string `json:"content"`
+	userID, ok := r.Context().Value("userID").(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		log.Printf("[ChatHandler] ERROR decoding completion request: %v", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+
+	var conversationID string
+	var content string
+	var attachmentIDs []string
+
+	// 2. Parse Request (JSON or Multipart)
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(10 << 20); err != nil { // 10MB limit
+			http.Error(w, "Error parsing multipart form", http.StatusBadRequest)
+			return
+		}
+		conversationID = r.FormValue("conversation_id")
+		content = r.FormValue("content")
+
+		// Handle files
+		files := r.MultipartForm.File["files"]
+		for _, fileHeader := range files {
+			file, err := fileHeader.Open()
+			if err != nil {
+				continue
+			}
+			
+			buf := new(bytes.Buffer)
+			if _, err := buf.ReadFrom(file); err == nil {
+				// Save to MinIO with user separation
+				fileID, err := h.storageService.Save(r.Context(), userID, fileHeader.Filename, buf.Bytes())
+				if err == nil {
+					attachmentIDs = append(attachmentIDs, fileID)
+				}
+			}
+			file.Close()
+		}
+	} else {
+		var req struct {
+			ConversationID string `json:"conversation_id"`
+			Content        string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("[ChatHandler] ERROR decoding completion request: %v", err)
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		conversationID = req.ConversationID
+		content = req.Content
+	}
+
+	if conversationID == "" || content == "" {
+		http.Error(w, "Missing conversation_id or content", http.StatusBadRequest)
 		return
 	}
 
@@ -131,7 +176,7 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 	errChan := make(chan error, 1)
 
 	go func() {
-		err := h.chatService.StreamCompletion(r.Context(), req.ConversationID, req.Content, func(thought string) {
+		err := h.chatService.StreamCompletion(r.Context(), conversationID, content, attachmentIDs, func(thought string) {
 			fmt.Fprintf(w, "event: thought\ndata: %s\n\n", thought)
 			flusher.Flush()
 		}, func(delta string) {
@@ -177,4 +222,43 @@ func (h *ChatHandler) DeleteConversation(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *ChatHandler) StreamEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	stream, err := h.chatService.GetEventStream(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	for {
+		select {
+		case event, ok := <-stream:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
 }

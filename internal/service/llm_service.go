@@ -2,14 +2,11 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"os"
 	"strings"
-	"time"
 
 	"ai-chat/internal/model"
+	"ai-chat/internal/ollama"
 	"ai-chat/internal/repository"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -21,41 +18,66 @@ type LLMService interface {
 }
 
 type llmService struct {
-	repo       repository.LLMRepository
-	httpClient *http.Client
+	repo         repository.LLMRepository
+	systemRepo   repository.SystemLLMRepository
+	ollamaClient ollama.Client
 }
 
-func NewLLMService(repo repository.LLMRepository) LLMService {
+func NewLLMService(repo repository.LLMRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client) LLMService {
 	return &llmService{
-		repo: repo,
-		httpClient: &http.Client{
-			Timeout: 3 * time.Second,
-		},
+		repo:         repo,
+		systemRepo:   systemRepo,
+		ollamaClient: ollamaClient,
 	}
 }
 
 func (s *llmService) ListModels(ctx context.Context, userID string) ([]*model.LLMInfo, error) {
 	// 1. Fetch Auto-Discovered Local Ollama Models
-	autoModels := s.discoverLocalOllamaModels()
+	autoModels := s.discoverLocalOllamaModels(ctx)
 
-	// 2. Fetch User-Configured Models from DB
+	// 2. Fetch "Known" System Models from JSON
+	systemModels := s.systemRepo.GetAllSystemModels()
+
+	// 3. Fetch User-Configured Models from DB
 	uID, _ := primitive.ObjectIDFromHex(userID)
 	configs, err := s.repo.GetByUserID(ctx, uID)
 	if err != nil {
-		// Log error but continue with auto-discovered models
 		fmt.Printf("[LLMService] ERROR fetching DB models: %v\n", err)
 	}
 
 	var allModels []*model.LLMInfo
-	allModels = append(allModels, autoModels...)
+	matchedAuto := make(map[string]bool)
 
-	for _, c := range configs {
-		status := s.checkModelStatus(c)
-		// If context window is missing in DB config, try to fetch it live
-		if c.ContextWindow == 0 && c.Provider == model.ProviderOllama {
-			c.ContextWindow = s.fetchOllamaModelDetails(c.BaseURL, c.ModelName)
+	// Process System Models (JSON)
+	for _, sm := range systemModels {
+		status := "Offline"
+		for _, am := range autoModels {
+			if am.Config.ModelName == sm.ModelName {
+				status = "Online"
+				matchedAuto[am.Config.ModelName] = true
+				break
+			}
 		}
-		
+		allModels = append(allModels, &model.LLMInfo{
+			Config:   sm,
+			Status:   status,
+			IsSystem: true,
+		})
+	}
+
+	// Add any Auto-Discovered models that weren't in our system list
+	for _, am := range autoModels {
+		if !matchedAuto[am.Config.ModelName] {
+			allModels = append(allModels, am)
+		}
+	}
+
+	// Process User Models from DB
+	for _, c := range configs {
+		status := s.checkModelStatus(ctx, c)
+		if c.ContextWindow == 0 && c.Provider == model.ProviderOllama {
+			c.ContextWindow = s.fetchOllamaModelContext(ctx, c.ModelName)
+		}
 		allModels = append(allModels, &model.LLMInfo{
 			Config:   *c,
 			Status:   status,
@@ -66,72 +88,46 @@ func (s *llmService) ListModels(ctx context.Context, userID string) ([]*model.LL
 	return allModels, nil
 }
 
-func (s *llmService) discoverLocalOllamaModels() []*model.LLMInfo {
-	baseURL := os.Getenv("OLLAMA_BASE_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:11434"
-	}
-	url := fmt.Sprintf("%s/api/tags", baseURL)
-	
-	resp, err := s.httpClient.Get(url)
+func (s *llmService) discoverLocalOllamaModels(ctx context.Context) []*model.LLMInfo {
+	names, err := s.ollamaClient.Tags(ctx)
 	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	var tags struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
 		return nil
 	}
 
 	var infos []*model.LLMInfo
-	for _, m := range tags.Models {
-		ctxWindow := s.fetchOllamaModelDetails(baseURL, m.Name)
+	for _, name := range names {
+		ctxWindow := s.fetchOllamaModelContext(ctx, name)
 		infos = append(infos, &model.LLMInfo{
 			Config: model.LLMConfig{
-				Name:          m.Name,
+				Name:          name,
 				Provider:      model.ProviderOllama,
-				ModelName:     m.Name,
-				BaseURL:       baseURL,
+				ModelName:     name,
+				BaseURL:       s.ollamaClient.GetBaseURL(),
 				ContextWindow: ctxWindow,
 			},
 			Status:   "Online",
-			IsSystem: true, // Marked as system because it's auto-discovered
+			IsSystem: true,
 		})
 	}
 	return infos
 }
 
-func (s *llmService) fetchOllamaModelDetails(baseURL, modelName string) int {
-	url := fmt.Sprintf("%s/api/show", baseURL)
-	body, _ := json.Marshal(map[string]string{"name": modelName})
-	
-	resp, err := s.httpClient.Post(url, "application/json", strings.NewReader(string(body)))
+func (s *llmService) fetchOllamaModelContext(ctx context.Context, modelName string) int {
+	details, err := s.ollamaClient.Show(ctx, modelName)
 	if err != nil {
-		return 2048 // Fallback to default
-	}
-	defer resp.Body.Close()
-
-	var details struct {
-		Parameters string `json:"parameters"`
-		ModelInfo  map[string]interface{} `json:"model_info"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
-		return 2048
+		return 2048 // Fallback
 	}
 
-	// 1. Try model_info (modern Ollama)
-	if ctx, ok := details.ModelInfo["llama.context_length"].(float64); ok {
-		return int(ctx)
+	// Try modern model_info
+	if infoField, ok := details["model_info"].(map[string]interface{}); ok {
+		if ctxLen, ok := infoField["llama.context_length"].(float64); ok {
+			return int(ctxLen)
+		}
 	}
 
-	// 2. Try parsing parameters string (older Ollama)
-	if strings.Contains(details.Parameters, "num_ctx") {
-		lines := strings.Split(details.Parameters, "\n")
+	// Try legacy parameters string parsing
+	if params, ok := details["parameters"].(string); ok && strings.Contains(params, "num_ctx") {
+		lines := strings.Split(params, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "num_ctx") {
 				fields := strings.Fields(line)
@@ -146,67 +142,23 @@ func (s *llmService) fetchOllamaModelDetails(baseURL, modelName string) int {
 		}
 	}
 
-	return 2048 // Default
+	return 2048
 }
 
-func (s *llmService) checkModelStatus(cfg *model.LLMConfig) string {
-	switch cfg.Provider {
-	case model.ProviderOllama:
-		return s.checkOllamaModelStatus(cfg.BaseURL, cfg.ModelName)
-	case model.ProviderOpenAI, model.ProviderClaude:
-		return "Online" // Assume cloud is online
-	default:
-		if cfg.BaseURL != "" {
-			return s.checkHTTPStatus(cfg.BaseURL)
+func (s *llmService) checkModelStatus(ctx context.Context, cfg *model.LLMConfig) string {
+	if cfg.Provider == model.ProviderOllama {
+		names, err := s.ollamaClient.Tags(ctx)
+		if err != nil {
+			return "Offline"
 		}
-		return "Online"
-	}
-}
-
-func (s *llmService) checkOllamaModelStatus(baseURL, modelName string) string {
-	if baseURL == "" {
-		baseURL = os.Getenv("OLLAMA_BASE_URL")
-		if baseURL == "" {
-			baseURL = "http://localhost:11434"
+		for _, name := range names {
+			if name == cfg.ModelName {
+				return "Online"
+			}
 		}
+		return "Missing"
 	}
-	url := fmt.Sprintf("%s/api/tags", baseURL)
-	
-	resp, err := s.httpClient.Get(url)
-	if err != nil {
-		return "Offline"
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return "Offline"
-	}
-
-	var tags struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
-		return "Offline"
-	}
-
-	for _, m := range tags.Models {
-		if m.Name == modelName {
-			return "Online"
-		}
-	}
-
-	return "Missing"
-}
-
-func (s *llmService) checkHTTPStatus(url string) string {
-	resp, err := s.httpClient.Get(url)
-	if err != nil || resp.StatusCode >= 400 {
-		return "Offline"
-	}
-	defer resp.Body.Close()
-	return "Online"
+	return "Online" // Cloud providers assumed online
 }
 
 func (s *llmService) AddModel(ctx context.Context, cfg *model.LLMConfig) (*model.LLMConfig, error) {
@@ -218,21 +170,10 @@ func (s *llmService) DeleteModel(ctx context.Context, id, userID string) error {
 	if err != nil {
 		return fmt.Errorf("invalid ID")
 	}
-
 	uID, _ := primitive.ObjectIDFromHex(userID)
-
-	// 1. Verify existence and ownership
 	existing, err := s.repo.GetByID(ctx, objID)
-	if err != nil {
-		return err
+	if err != nil || existing == nil || existing.UserID != uID {
+		return fmt.Errorf("model not found or unauthorized")
 	}
-	if existing == nil {
-		return fmt.Errorf("model not found")
-	}
-
-	if existing.UserID != uID {
-		return fmt.Errorf("unauthorized to delete this model")
-	}
-
 	return s.repo.Delete(ctx, objID)
 }

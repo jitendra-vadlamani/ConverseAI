@@ -18,6 +18,7 @@ type Message struct {
 	Role         MessageRole `bson:"role" json:"role"`
 	Content      string      `bson:"content" json:"content"`
 	Reasoning    string      `bson:"reasoning,omitempty" json:"reasoning,omitempty"`
+	Attachments  []string    `bson:"attachments,omitempty" json:"attachments,omitempty"` // IDs/Paths in Storage
 	TokenCount   int         `bson:"token_count" json:"token_count"`
 	IsSummarized bool        `bson:"is_summarized" json:"is_summarized"`
 	CreatedAt    time.Time   `bson:"created_at" json:"created_at"`

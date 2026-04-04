@@ -4,18 +4,23 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"ai-chat/internal/model"
+	"ai-chat/internal/ollama"
+	"ai-chat/internal/orchestrator"
+	"ai-chat/internal/manager"
 	"ai-chat/internal/repository"
+	"ai-chat/internal/storage"
 	"ai-chat/internal/util"
+	"ai-chat/internal/events"
+	"github.com/ledongthuc/pdf"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -23,22 +28,45 @@ type ChatService interface {
 	CreateConversation(ctx context.Context, userID, modelConfigID, modelName, title string) (*model.Conversation, error)
 	GetConversation(ctx context.Context, id string) (*model.Conversation, error)
 	ListConversations(ctx context.Context, userID string) ([]*model.Conversation, error)
-	StreamCompletion(ctx context.Context, conversationID, prompt string, onThought func(string), onDelta func(string)) error
+	StreamCompletion(ctx context.Context, conversationID, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error
 	DeleteConversation(ctx context.Context, id string) error
+	GetEventStream(ctx context.Context, conversationID string) (<-chan model.ConversationEvent, error)
 }
 
 type chatService struct {
-	repo       repository.ChatRepository
-	llmRepo    repository.LLMRepository
-	httpClient *http.Client
+	repo           repository.ChatRepository
+	llmRepo        repository.LLMRepository
+	ollamaClient   ollama.Client
+	modelManager   manager.ModelManager
+	orchestrator   orchestrator.Orchestrator
+	planner        orchestrator.Planner
+	storageService storage.StorageService
+	eventRepo      repository.EventRepository
+	eventBroker    events.EventBroker
+	ragService     RagService
 }
 
-func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMRepository) ChatService {
+func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService) ChatService {
 	return &chatService{
-		repo:       repo,
-		llmRepo:    llmRepo,
-		httpClient: &http.Client{},
+		repo:           repo,
+		llmRepo:        llmRepo,
+		ollamaClient:   ollamaClient,
+		modelManager:   modelManager,
+		orchestrator:   orch,
+		planner:        planner,
+		storageService: storageService,
+		eventRepo:      eventRepo,
+		eventBroker:    eventBroker,
+		ragService:     ragService,
 	}
+}
+
+func (s *chatService) GetEventStream(ctx context.Context, conversationID string) (<-chan model.ConversationEvent, error) {
+	cID, err := primitive.ObjectIDFromHex(conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid conversation ID: %w", err)
+	}
+	return s.eventBroker.Subscribe(cID), nil
 }
 
 func (s *chatService) CreateConversation(ctx context.Context, userID, modelConfigID, modelName, title string) (*model.Conversation, error) {
@@ -47,14 +75,12 @@ func (s *chatService) CreateConversation(ctx context.Context, userID, modelConfi
 	if modelConfigID != "" {
 		mID, _ = primitive.ObjectIDFromHex(modelConfigID)
 	}
-
-	conv := &model.Conversation{
+	return s.repo.CreateConversation(ctx, &model.Conversation{
 		UserID:        uID,
 		ModelConfigID: mID,
 		ModelName:     modelName,
 		Title:         title,
-	}
-	return s.repo.CreateConversation(ctx, conv)
+	})
 }
 
 func (s *chatService) GetConversation(ctx context.Context, id string) (*model.Conversation, error) {
@@ -69,11 +95,49 @@ func (s *chatService) ListConversations(ctx context.Context, userID string) ([]*
 
 func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 	objID, _ := primitive.ObjectIDFromHex(id)
+	
+	// 1. Fetch conversation to get attachment list
+	conv, err := s.repo.GetConversationByID(ctx, objID)
+	if err != nil {
+		return err
+	}
+	if conv == nil {
+		return fmt.Errorf("conversation not found")
+	}
+
+	// 2. Clean up files in Storage
+	for _, msg := range conv.Messages {
+		for _, fileID := range msg.Attachments {
+			// Clean up binary storage
+			if err := s.storageService.Delete(ctx, fileID); err != nil {
+				log.Printf("[ChatService] Warning: Failed to delete attachment %s: %v", fileID, err)
+			}
+			// Clean up vector storage
+			if err := s.ragService.DeleteFileKnowledge(ctx, conv.UserID.Hex(), fileID); err != nil {
+				log.Printf("[ChatService] Warning: Failed to delete RAG knowledge for %s: %v", fileID, err)
+			}
+		}
+	}
+
+	// 3. Delete from DB
 	return s.repo.DeleteConversation(ctx, objID)
 }
 
-func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prompt string, onThought func(string), onDelta func(string)) error {
-	// Add 5m default timeout (increased from 60s for local Ollama reliability)
+func (s *chatService) emitEvent(ctx context.Context, conversationID, userID primitive.ObjectID, eventType model.EventType, payload interface{}) {
+	event := model.ConversationEvent{
+		ConversationID: conversationID,
+		UserID:         userID,
+		Type:           eventType,
+		Payload:        payload,
+		Timestamp:      time.Now(),
+	}
+	if err := s.eventRepo.StoreEvent(ctx, event); err != nil {
+		log.Printf("[ChatService] Warning: Failed to store event %s: %v", eventType, err)
+	}
+	s.eventBroker.Publish(event)
+}
+
+func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error {
 	tCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
 	defer cancel()
 
@@ -83,92 +147,236 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		return err
 	}
 
-	// Resolve LLM Config
-	var llmConfig *model.LLMConfig
-	if !conv.ModelConfigID.IsZero() {
-		llmConfig, _ = s.llmRepo.GetByID(tCtx, conv.ModelConfigID)
-	}
-
-	if llmConfig == nil && conv.ModelName != "" {
-		baseURL := os.Getenv("OLLAMA_BASE_URL")
-		if baseURL == "" {
-			baseURL = "http://localhost:11434"
-		}
-		llmConfig = &model.LLMConfig{
-			Provider:  model.ProviderOllama,
-			ModelName: conv.ModelName,
-			BaseURL:   baseURL,
-		}
-	}
-
+	llmConfig := s.resolveLLMConfig(tCtx, conv)
 	if llmConfig == nil {
-		log.Printf("[ChatService] ERROR: No model configuration found for conversation %s", conversationID)
-		return fmt.Errorf("no model configuration found for this conversation")
+		return fmt.Errorf("no model configuration found")
 	}
 
-	// 1. Save User Message
-	userTokenCount := util.CountTokens(prompt)
-	userMsg := model.Message{
-		Role:       model.RoleUser,
-		Content:    prompt,
-		TokenCount: userTokenCount,
-		CreatedAt:  time.Now(),
+	// 1. Resolve attachments from Storage
+	images, extraContext, err := s.resolveAttachments(tCtx, conv.UserID.Hex(), attachmentIDs)
+	if err != nil {
+		log.Printf("[ChatService] Warning: Failed to resolve some attachments: %v", err)
 	}
 
-	// Use independent context for saving to ensure it completes even if request is cancelled
-	userSaveCtx, userSaveCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer userSaveCancel()
+	// 2. RAG Semantic Search
+	ragContext, err := s.ragService.Search(tCtx, conv.UserID.Hex(), prompt, 5)
+	if err != nil {
+		log.Printf("[ChatService] Warning: RAG search failed: %v", err)
+	}
+	if len(ragContext) > 0 {
+		extraContext += "\n### RELEVANT KNOWLEDGE FROM YOUR DOCUMENTS:\n" + strings.Join(ragContext, "\n---\n")
+	}
 
-	if err := s.repo.AddMessage(userSaveCtx, conv.ID, userMsg); err != nil {
-		log.Printf("[ChatService] ERROR adding user message: %v", err)
+	finalPrompt := prompt
+	if extraContext != "" {
+		finalPrompt = fmt.Sprintf("%s\n\n### ADDITIONAL CONTEXT:\n%s", prompt, extraContext)
+	}
+
+	// 2. Emit User Message Received Event
+	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventUserMessageReceived, map[string]interface{}{
+		"prompt": prompt, "attachments": attachmentIDs,
+	})
+
+	// 3. Save User Message
+	userTokenCount := util.CountTokens(finalPrompt)
+	if err := s.repo.AddMessage(context.Background(), conv.ID, model.Message{
+		Role: model.RoleUser, Content: finalPrompt, Attachments: attachmentIDs, TokenCount: userTokenCount, CreatedAt: time.Now(),
+	}); err != nil {
 		return err
 	}
 
-	// 2. Check for Summarization Need
-	maxContext := 2048
-	if llmConfig.ContextWindow > 0 {
-		maxContext = llmConfig.ContextWindow
+	// 4. Handle Summarization
+	s.handleSummarization(tCtx, llmConfig, conv, userTokenCount)
+	conv, _ = s.repo.GetConversationByID(tCtx, conv.ID) // Reload
+
+	// 5. Planning & Orchestration Routing
+	onThought("[Planning] Analyzing request and attachments...\n")
+	plan, err := s.planner.Plan(tCtx, finalPrompt, llmConfig.ModelName, images)
+	
+	// Emit Planning Event
+	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, map[string]interface{}{
+		"plan": plan, "error": err,
+	})
+
+	isOrchestration := false
+	if err == nil && len(plan) > 0 {
+		if len(plan) > 1 || plan[0].Type != model.TaskChat {
+			isOrchestration = true
+		}
 	}
 
-	// Trigger summarization if the CURRENT context (including new prompt) exceeds 90% of the limit
-	if conv.TotalTokens+userTokenCount > int(float64(maxContext)*0.9) {
-		log.Printf("[ChatService] Triggering summarization (Used: %d, New: %d, Limit: %d)", conv.TotalTokens, userTokenCount, maxContext)
-		if err := s.triggerSummarization(tCtx, llmConfig, conv); err != nil {
-			log.Printf("[ChatService] WARNING: Summarization failed: %v", err)
+	var fullAIResponse, fullReasoning string
+
+	if isOrchestration {
+		onThought(fmt.Sprintf("[Orchestration] Executing %d tasks...\n", len(plan)))
+		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationStarted, map[string]interface{}{
+			"task_count": len(plan),
+		})
+
+		result, err := s.orchestrator.Run(tCtx, finalPrompt, llmConfig.ModelName, images, conv.ID, conv.UserID)
+		
+		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationFinished, map[string]interface{}{
+			"success": err == nil, "error": err,
+		})
+
+		if err != nil {
+			onDelta(fmt.Sprintf("\nError during orchestration: %v", err))
+			fullAIResponse = fmt.Sprintf("Orchestration failed: %v", err)
 		} else {
-			// Reload conversation to get the new summary and is_summarized flags
-			conv, _ = s.repo.GetConversationByID(tCtx, conv.ID)
+			var sb strings.Builder
+			sb.WriteString("### Orchestrated Results\n\n")
+			for _, t := range result.Plan {
+				sb.WriteString(fmt.Sprintf("#### Task: %s\n%s\n\n", t.Type, t.Output))
+			}
+			fullAIResponse = sb.String()
+			onDelta(fullAIResponse)
 		}
 	} else {
-		// Even if not summarizing, we need to add the NEW user message to the local conv object
-		// because we already saved it to the DB but the 'conv' object was loaded before that.
-		conv.Messages = append(conv.Messages, userMsg)
+		if llmConfig.Provider == model.ProviderOllama {
+			if err := s.modelManager.PrepareModel(tCtx, llmConfig.ModelName); err != nil {
+				log.Printf("[ChatService] Warning: PrepareModel failed: %v", err)
+			}
+		}
+
+		onThought("[Conversation] Starting standard chat...\n")
+		fullAIResponse, fullReasoning, err = s.processStream(tCtx, llmConfig, conv, finalPrompt, images, onThought, onDelta)
+		if err != nil {
+			return err
+		}
 	}
 
-	isThinking := false
-	fullReasoning := ""
-	fullAIResponse := ""
+	// 6. Save Assistant Message
+	aiTokenCount := util.CountTokens(fullAIResponse + fullReasoning)
+	s.repo.AddMessage(context.Background(), conv.ID, model.Message{
+		Role: model.RoleAssistant, Content: fullAIResponse, Reasoning: fullReasoning, TokenCount: aiTokenCount, CreatedAt: time.Now(),
+	})
 	
-	// A simple streaming parser for <think> and </think>
-	err = s.callLLMStream(tCtx, llmConfig, conv, prompt, func(chunk string) {
-		// Detect thinking tags if they appear in chunks
-		// This is a naive parser but works for most models emitting these tags
+	// Emit Generation Event
+	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventAssistantMessageGenerated, map[string]interface{}{
+		"token_count": aiTokenCount,
+	})
+
+	return s.repo.UpdateTotalTokens(context.Background(), conv.ID, userTokenCount+aiTokenCount)
+}
+
+func (s *chatService) resolveLLMConfig(ctx context.Context, conv *model.Conversation) *model.LLMConfig {
+	if !conv.ModelConfigID.IsZero() {
+		cfg, _ := s.llmRepo.GetByID(ctx, conv.ModelConfigID)
+		if cfg != nil { return cfg }
+	}
+	return &model.LLMConfig{
+		Provider: model.ProviderOllama, ModelName: conv.ModelName, BaseURL: s.ollamaClient.GetBaseURL(),
+	}
+}
+
+func (s *chatService) handleSummarization(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, userTokenCount int) {
+	maxContext := cfg.ContextWindow
+	if maxContext == 0 { maxContext = 2048 }
+	if conv.TotalTokens+userTokenCount > int(float64(maxContext)*0.9) {
+		s.triggerSummarization(ctx, cfg, conv)
+	}
+}
+
+func (s *chatService) resolveAttachments(ctx context.Context, userID string, attachmentIDs []string) ([]string, string, error) {
+	var images []string
+	var extraContext strings.Builder
+
+	for _, id := range attachmentIDs {
+		data, err := s.storageService.Get(ctx, id)
+		if err != nil {
+			log.Printf("[ChatService] Failed to get attachment %s: %v", id, err)
+			continue
+		}
+
+		ext := strings.ToLower(filepath.Ext(id))
+		if isImage(ext) {
+			images = append(images, base64.StdEncoding.EncodeToString(data))
+		} else if isText(ext) || ext == ".pdf" {
+			textContent := ""
+			if ext == ".pdf" {
+				textContent, _ = extractTextFromPDF(data)
+			} else {
+				textContent = string(data)
+			}
+
+			// Selective Ingestion: Large files (>20KB) go to RAG
+			if len(data) > 20*1024 {
+				fmt.Printf("[ChatService] File %s is large (%d bytes), triggering RAG ingestion\n", id, len(data))
+				go func(uID, fID, fName, content string) {
+					err := s.ragService.Ingest(context.Background(), uID, fID, fName, content)
+					if err != nil {
+						log.Printf("[ChatService] RAG Ingestion failed for %s: %v", fID, err)
+					}
+				}(userID, id, id, textContent)
+				
+				extraContext.WriteString(fmt.Sprintf("\n(Large file '%s' indexed for semantic search)\n", id))
+			} else {
+				// Small files are injected directly
+				label := "FILE"
+				if ext == ".pdf" { label = "PDF DOCUMENT" }
+				extraContext.WriteString(fmt.Sprintf("\n--- %s: %s ---\n%s\n", label, id, textContent))
+			}
+		}
+	}
+
+	return images, extraContext.String(), nil
+}
+
+func extractTextFromPDF(data []byte) (string, error) {
+	r := bytes.NewReader(data)
+	pdfReader, err := pdf.NewReader(r, int64(len(data)))
+	if err != nil {
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	for i := 1; i <= pdfReader.NumPage(); i++ {
+		p := pdfReader.Page(i)
+		if p.V.IsNull() {
+			continue
+		}
+		text, err := p.GetPlainText(nil)
+		if err != nil {
+			continue
+		}
+		buf.WriteString(text)
+	}
+	return buf.String(), nil
+}
+
+func isImage(ext string) bool {
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		return true
+	}
+	return false
+}
+
+func isText(ext string) bool {
+	switch ext {
+	case ".txt", ".csv", ".json", ".md", ".go", ".py", ".js", ".ts":
+		return true
+	}
+	return false
+}
+
+func (s *chatService) processStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, prompt string, images []string, onThought, onDelta func(string)) (string, string, error) {
+	fullReasoning, fullAIResponse := "", ""
+	isThinking := false
+	
+	err := s.callLLMStream(ctx, cfg, conv, images, func(chunk string) {
 		cleanChunk := chunk
-		
 		if strings.Contains(chunk, "<think>") {
 			isThinking = true
 			parts := strings.Split(chunk, "<think>")
 			if len(parts) > 1 {
-				// Text before tag is content, after is reasoning
 				if parts[0] != "" { onDelta(parts[0]); fullAIResponse += parts[0] }
 				cleanChunk = parts[1]
 			}
 		} 
-		
 		if strings.Contains(chunk, "</think>") {
 			parts := strings.Split(chunk, "</think>")
 			if len(parts) > 1 {
-				// Text before closing tag is reasoning, after is content
 				if parts[0] != "" { onThought(parts[0]); fullReasoning += parts[0] }
 				isThinking = false
 				if parts[1] != "" { onDelta(parts[1]); fullAIResponse += parts[1] }
@@ -177,7 +385,6 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 			isThinking = false
 			return
 		}
-
 		if isThinking {
 			fullReasoning += cleanChunk
 			onThought(cleanChunk)
@@ -186,255 +393,63 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 			onDelta(cleanChunk)
 		}
 	})
-
-	if err != nil {
-		log.Printf("[ChatService] ERROR in callLLMStream: %v", err)
-		return err
-	}
-
-	// 3. Save AI Assistant Message with Reasoning and Token Count
-	aiTokenCount := util.CountTokens(fullAIResponse + fullReasoning)
-	aiMsg := model.Message{
-		Role:       model.RoleAssistant,
-		Content:    fullAIResponse,
-		Reasoning:  fullReasoning,
-		TokenCount: aiTokenCount,
-		CreatedAt:  time.Now(),
-	}
-	
-	// Use Background context for saving to ensure it completes even if request is cancelled
-	saveCtx, saveCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer saveCancel()
-
-	if err := s.repo.AddMessage(saveCtx, conv.ID, aiMsg); err != nil {
-		log.Printf("[ChatService] ERROR adding assistant message: %v", err)
-		return err
-	}
-
-	// 4. Update Conversation Total Tokens
-	log.Printf("[ChatService] Saving Assistant message (%d tokens) for convo %s. Sample: %.20s...", aiTokenCount, conversationID, fullAIResponse)
-	return s.repo.UpdateTotalTokens(saveCtx, conv.ID, userTokenCount+aiTokenCount)
+	return fullAIResponse, fullReasoning, err
 }
 
-func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, newContent string, onChunk func(string)) error {
-	switch cfg.Provider {
-	case model.ProviderOllama:
-		return s.streamOllama(ctx, cfg, conv, newContent, onChunk)
-	case model.ProviderOpenAI, model.ProviderCustom:
-		return s.streamOpenAI(ctx, cfg, conv, newContent, onChunk)
-	default:
-		return fmt.Errorf("unsupported provider: %s", cfg.Provider)
-	}
-}
-
-func (s *chatService) streamOllama(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, content string, onChunk func(string)) error {
-	url := cfg.BaseURL + "/api/chat"
-	
-	messages := s.prepareMessages(conv)
-
-	// Ensure we have a sane default for context window if it's somehow 0
-	ctxWindow := cfg.ContextWindow
-	if ctxWindow == 0 {
-		ctxWindow = 2048
-	}
-
-	reqBody, _ := json.Marshal(map[string]interface{}{
-		"model":    cfg.ModelName,
-		"messages": messages,
-		"stream":   true,
-		"options": map[string]interface{}{
-			"num_ctx": ctxWindow,
-		},
-	})
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return err
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ollama returned error: %d", resp.StatusCode)
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		var line struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			Done bool `json:"done"`
-		}
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
-		}
-		onChunk(line.Message.Content)
-		if line.Done {
-			break
-		}
-	}
-	return nil
-}
-
-func (s *chatService) streamOpenAI(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, content string, onChunk func(string)) error {
-	url := cfg.BaseURL + "/v1/chat/completions"
-	if cfg.Provider == model.ProviderOpenAI && cfg.BaseURL == "" {
-		url = "https://api.openai.com/v1/chat/completions"
-	}
-
-	messages := s.prepareMessages(conv)
-
-	reqBody, _ := json.Marshal(map[string]interface{}{
-		"model":    cfg.ModelName,
-		"messages": messages,
-		"stream":   true,
-	})
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
-	if err != nil {
-		return err
-	}
-	if cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
+func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, images []string, onChunk func(string)) error {
+	if cfg.Provider == model.ProviderOllama {
+		messages := s.prepareMessages(ctx, conv)
+		// If images were passed for the CURRENT prompt, add them to the last message
+		if len(images) > 0 && len(messages) > 0 && messages[len(messages)-1].Role == string(model.RoleUser) {
+			messages[len(messages)-1].Images = images
 		}
 
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-
-		if len(chunk.Choices) > 0 {
-			onChunk(chunk.Choices[0].Delta.Content)
-		}
-	}
-	return nil
-}
-func (s *chatService) prepareMessages(conv *model.Conversation) []map[string]string {
-	messages := []map[string]string{}
-
-	// 1. Add Summary if exists
-	if conv.Summary != "" {
-		messages = append(messages, map[string]string{
-			"role":    "assistant",
-			"content": "Context Summary of previous conversation parts: " + conv.Summary,
+		resp, err := s.ollamaClient.Chat(ctx, &ollama.ChatRequest{
+			Model: cfg.ModelName, Messages: messages, Stream: true,
+			Options: map[string]interface{}{"num_ctx": cfg.ContextWindow},
 		})
-	}
+		if err != nil { return err }
+		defer resp.Body.Close()
 
-	// 2. Add unsummarized messages
-	// Note: The latest prompt is already in conv.Messages by the time this is called
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			var line struct { Message struct { Content string `json:"content"` } `json:"message"`; Done bool `json:"done"` }
+			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
+				onChunk(line.Message.Content)
+				if line.Done { break }
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("unsupported provider")
+}
+
+func (s *chatService) prepareMessages(ctx context.Context, conv *model.Conversation) []ollama.ChatMessage {
+	messages := []ollama.ChatMessage{}
+	if conv.Summary != "" {
+		messages = append(messages, ollama.ChatMessage{Role: "assistant", Content: "Context Summary: " + conv.Summary})
+	}
 	for _, m := range conv.Messages {
 		if !m.IsSummarized {
-			messages = append(messages, map[string]string{"role": string(m.Role), "content": m.Content})
+			img, _, _ := s.resolveAttachments(ctx, conv.UserID.Hex(), m.Attachments)
+			messages = append(messages, ollama.ChatMessage{Role: string(m.Role), Content: m.Content, Images: img})
 		}
 	}
-
 	return messages
 }
 
-func (s *chatService) triggerSummarization(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation) error {
-	url := cfg.BaseURL + "/api/chat"
-	if cfg.Provider == model.ProviderOpenAI {
-		url = cfg.BaseURL + "/v1/chat/completions"
-	}
-
+func (s *chatService) triggerSummarization(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation) {
 	historyText := ""
-	for _, m := range conv.Messages {
-		historyText += fmt.Sprintf("%s: %s\n", m.Role, m.Content)
+	for _, m := range conv.Messages { historyText += fmt.Sprintf("%s: %s\n", m.Role, m.Content) }
+	prompt := fmt.Sprintf("Summarize the following conversation history for long-term memory. Be concise. Do NOT include any other text.\n\nCONVERSATION:\n%s", historyText)
+
+	resp, _ := s.ollamaClient.Generate(ctx, &ollama.GenerateRequest{
+		Model: cfg.ModelName, Prompt: prompt, Stream: false,
+	})
+	if resp != nil && resp.Response != "" {
+		summaryTokens := util.CountTokens(resp.Response)
+		s.repo.UpdateSummary(ctx, conv.ID, resp.Response, summaryTokens)
+		s.repo.MarkMessagesAsSummarized(ctx, conv.ID)
+		s.repo.UpdateTotalTokens(ctx, conv.ID, -(conv.TotalTokens - summaryTokens))
 	}
-
-	prompt := fmt.Sprintf("Summarize the following conversation history for long-term memory. Be concise but cover all key points. Do NOT include any other text, just the summary itself.\n\nCONVERSATION:\n%s", historyText)
-
-	payload := map[string]interface{}{
-		"model":  cfg.ModelName,
-		"stream": false,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-	}
-
-	reqBody, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
-	
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return err
-	}
-
-	summary := result.Message.Content
-	if len(result.Choices) > 0 {
-		summary = result.Choices[0].Message.Content
-	}
-
-	if summary == "" {
-		return fmt.Errorf("empty summary received")
-	}
-
-	// Persist summary and flag messages
-	summaryTokens := util.CountTokens(summary)
-	if err := s.repo.UpdateSummary(ctx, conv.ID, summary, summaryTokens); err != nil {
-		return err
-	}
-
-	if err := s.repo.MarkMessagesAsSummarized(ctx, conv.ID); err != nil {
-		return err
-	}
-
-	// Recalculate total tokens: Summary + any message NOT summarized (though usually we summarize all)
-	// For now, assume all were summarized.
-	return s.repo.UpdateTotalTokens(ctx, conv.ID, -(conv.TotalTokens - summaryTokens))
 }

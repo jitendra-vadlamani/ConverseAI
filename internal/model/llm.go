@@ -25,6 +25,21 @@ type LLMConfig struct {
 	APIKey        string              `bson:"api_key,omitempty" json:"api_key,omitempty"`
 	Description   string              `bson:"description,omitempty" json:"description,omitempty"`
 	ContextWindow int                 `bson:"context_window" json:"context_window"`
+	
+	// Advanced Metadata
+	Architecture    string   `bson:"architecture,omitempty" json:"architecture,omitempty"`
+	ParametersCount string   `bson:"parameters_count,omitempty" json:"parameters_count,omitempty"`
+	EmbeddingLength int      `bson:"embedding_length,omitempty" json:"embedding_length,omitempty"`
+	Quantization    string   `bson:"quantization,omitempty" json:"quantization,omitempty"`
+	Capabilities    []string `bson:"capabilities,omitempty" json:"capabilities,omitempty"`
+	
+	// Default Parameters
+	Temperature   float64  `bson:"temperature,omitempty" json:"temperature,omitempty"`
+	TopK          int      `bson:"top_k,omitempty" json:"top_k,omitempty"`
+	TopP          float64  `bson:"top_p,omitempty" json:"top_p,omitempty"`
+	RepeatPenalty float64  `bson:"repeat_penalty,omitempty" json:"repeat_penalty,omitempty"`
+	StopSequences []string `bson:"stop_sequences,omitempty" json:"stop_sequences,omitempty"`
+
 	CreatedAt     time.Time           `bson:"created_at" json:"created_at"`
 	UpdatedAt     time.Time           `bson:"updated_at" json:"updated_at"`
 }

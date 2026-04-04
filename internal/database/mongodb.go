@@ -4,15 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"ai-chat/internal/config"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-)
-
-var (
-	ctx = context.Background()
 )
 
 type Database struct {
@@ -21,15 +18,20 @@ type Database struct {
 }
 
 func NewDatabase(cfg *config.Config) (*Database, error) {
+	// Use context with timeout for connection
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	clientOptions := options.Client().ApplyURI(cfg.MongoURI)
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 
+	// Use the same context with timeout for ping
 	err = client.Ping(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
+		return nil, fmt.Errorf("failed to ping MongoDB at %s: %w", cfg.MongoURI, err)
 	}
 
 	db := client.Database(cfg.DBName)
@@ -44,6 +46,6 @@ func NewDatabase(cfg *config.Config) (*Database, error) {
 		return nil, fmt.Errorf("failed to create index on email: %w", err)
 	}
 
-	log.Println("Connected to MongoDB successfully.")
+	log.Printf("Connected to MongoDB successfully at %s", cfg.MongoURI)
 	return &Database{Client: client, DB: db}, nil
 }
