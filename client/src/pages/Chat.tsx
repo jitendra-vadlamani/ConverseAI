@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Hash, Paperclip, File as FileIcon, X } from 'lucide-react';
-import { getEncoding } from 'js-tiktoken';
+// import { getEncoding } from 'js-tiktoken';
 import { listLLMsApi, type LLMInfo } from '../api/llm';
 import {
   listConversationsApi,
@@ -42,13 +42,13 @@ export const Chat: React.FC = () => {
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingThought, setStreamingThought] = useState('');
   const [abortController, setAbortController] = useState<AbortController | null>(null);
-  const [tokenCount, setTokenCount] = useState(0);
+  // const [tokenCount, setTokenCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const enc = useRef(getEncoding('cl100k_base'));
+  // const enc = useRef(getEncoding('cl100k_base'));
 
-  useEffect(() => {
-    setTokenCount(enc.current.encode(input).length);
-  }, [input]);
+  // useEffect(() => {
+  //   setTokenCount(enc.current.encode(input).length);
+  // }, [input]);
 
   useEffect(() => {
     fetchInitialData();
@@ -62,9 +62,8 @@ export const Chat: React.FC = () => {
       ]);
       setConversations(convs || []);
       setLLMs(models || []);
-      if (models && models.length > 0) {
-        setSelectedModelId(models[0].config.id || models[0].config.name);
-      }
+      // Default to Auto-Routing ("")
+      setSelectedModelId("");
     } catch (err) {
       console.error('Failed to fetch initial data:', err);
     }
@@ -126,8 +125,8 @@ export const Chat: React.FC = () => {
     if (!input.trim() || loading) return;
 
     const selectedModel = llms.find(m => (m.config.id || m.config.name) === selectedModelId);
-    if (selectedModel && selectedModel.status !== 'Online') {
-      alert(`The selected model is currently ${selectedModel.status}. Please select an Online model.`);
+    if (selectedModelId !== "" && selectedModel && selectedModel.status !== 'Online') {
+      alert(`The selected model "${selectedModel.config.name}" is currently ${selectedModel.status}. Please select an Online model from the dropdown at the top, or use Auto-Routing.`);
       return;
     }
 
@@ -245,9 +244,23 @@ export const Chat: React.FC = () => {
         ) : !currentConversation ? (
           <div className="welcome-container">
             <header className="chat-header">
-              <div className="model-info-badge">
-                <Brain size={14} />
-                <span>Auto-Routing Enabled</span>
+              <div className={selectedModelId === "" ? "model-info-badge" : "model-selector-container"}>
+                {selectedModelId === "" && <Brain size={14} />}
+                <select 
+                  className="model-dropdown-simple"
+                  value={selectedModelId}
+                  onChange={(e) => setSelectedModelId(e.target.value)}
+                >
+                  <option value="">Auto-Routing (Intelligent)</option>
+                  {llms.map((m) => (
+                    <option key={m.config.id || m.config.name} value={m.config.id || m.config.name}>
+                      {m.config.name} ({m.status})
+                    </option>
+                  ))}
+                </select>
+                {selectedModelId !== "" && (
+                  <div className={`status-dot ${llms.find(m => (m.config.id || m.config.name) === selectedModelId)?.status === 'Online' ? 'online' : 'offline'}`}></div>
+                )}
               </div>
             </header>
             <div className="welcome-content">
@@ -315,9 +328,23 @@ export const Chat: React.FC = () => {
         ) : (
           <>
             <header className="chat-header">
-              <div className="model-info-badge">
-                <Brain size={14} />
-                <span>Auto-Routing Enabled</span>
+              <div className={selectedModelId === "" ? "model-info-badge" : "model-selector-container"}>
+                {selectedModelId === "" && <Brain size={14} />}
+                <select 
+                  className="model-dropdown-simple"
+                  value={selectedModelId}
+                  onChange={(e) => setSelectedModelId(e.target.value)}
+                >
+                  <option value="">Auto-Routing (Intelligent)</option>
+                  {llms.map((m) => (
+                    <option key={m.config.id || m.config.name} value={m.config.id || m.config.name}>
+                      {m.config.name} ({m.status})
+                    </option>
+                  ))}
+                </select>
+                {selectedModelId !== "" && (
+                  <div className={`status-dot ${llms.find(m => (m.config.id || m.config.name) === selectedModelId)?.status === 'Online' ? 'online' : 'offline'}`}></div>
+                )}
               </div>
             </header>
 
@@ -492,11 +519,17 @@ export const Chat: React.FC = () => {
         .input-container { background: white; border: 1px solid #d1d5db; border-radius: 0.75rem; padding: 0.5rem; display: flex; align-items: flex-end; gap: 0.5rem; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
         .chat-textarea { flex: 1; min-height: 24px; max-height: 200px; padding: 0.75rem 0.5rem; padding-left: 1rem; border: none; outline: none; background: transparent; font-family: inherit; font-size: 0.9375rem; resize: none; color: #1e293b; line-height: 1.5; }
         .input-actions-left { display: flex; align-items: center; padding: 0 0.5rem; }
-        .action-btn { background: none; border: none; color: #64748b; cursor: pointer; padding: 0.5rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+        .action-btn { background: none; border: none; color: #64748b; cursor: pointer; padding: 0.5rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.2s; width: 34px; height: 34px; flex-shrink: 0; }
         .action-btn:hover { background: #f1f5f9; color: #0f172a; }
-        .send-btn { background: none; border: none; color: #cbd5e1; cursor: pointer; padding: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0.5rem; margin-right: 0.25rem; }
+        .send-btn { background: none; border: none; color: #cbd5e1; cursor: pointer; padding: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0.5rem; margin-right: 0.25rem; flex-shrink: 0; }
         .send-btn.active { color: #2563eb; background: #eff6ff; }
         .send-btn.active:hover { transform: scale(1.1); transform-origin: center; }
+
+        .model-selector-container { display: flex; align-items: center; gap: 0.5rem; background: #f8fafc; padding: 0.25rem 0.75rem; border-radius: 2rem; border: 1px solid #e2e8f0; }
+        .model-dropdown-simple { background: transparent; border: none; font-size: 0.75rem; font-weight: 600; color: #475569; outline: none; cursor: pointer; padding-right: 0.5rem; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .status-dot.online { background: #10b981; box-shadow: 0 0 0 2px #d1fae5; }
+        .status-dot.offline { background: #ef4444; box-shadow: 0 0 0 2px #fee2e2; }
 
         .file-preview-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; padding: 0 1rem; padding-bottom: 0.5rem; }
         .file-chip { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 0.5rem; padding: 0.25rem 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; color: #475569; position: relative; transition: all 0.2s; }
