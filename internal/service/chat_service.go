@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ai-chat/internal/config"
 	"ai-chat/internal/model"
 	"ai-chat/internal/ollama"
 	"ai-chat/internal/orchestrator"
@@ -44,9 +45,10 @@ type chatService struct {
 	eventRepo      repository.EventRepository
 	eventBroker    events.EventBroker
 	ragService     RagService
+	cfg            *config.Config
 }
 
-func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService) ChatService {
+func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
 	return &chatService{
 		repo:           repo,
 		llmRepo:        llmRepo,
@@ -58,6 +60,7 @@ func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMReposi
 		eventRepo:      eventRepo,
 		eventBroker:    eventBroker,
 		ragService:     ragService,
+		cfg:            cfg,
 	}
 }
 
@@ -74,6 +77,9 @@ func (s *chatService) CreateConversation(ctx context.Context, userID, modelConfi
 	var mID primitive.ObjectID
 	if modelConfigID != "" {
 		mID, _ = primitive.ObjectIDFromHex(modelConfigID)
+	}
+	if modelName == "" {
+		modelName = s.cfg.DefaultChatModel
 	}
 	return s.repo.CreateConversation(ctx, &model.Conversation{
 		UserID:        uID,
@@ -191,7 +197,11 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 
 	// 5. Planning & Orchestration Routing
 	onThought("[Planning] Analyzing request and attachments...\n")
-	plan, err := s.planner.Plan(tCtx, finalPrompt, llmConfig.ModelName, images)
+	plannerModel := llmConfig.ModelName
+	if plannerModel == "" {
+		plannerModel = s.cfg.DefaultPlannerModel
+	}
+	plan, err := s.planner.Plan(tCtx, finalPrompt, plannerModel, images)
 	
 	// Emit Planning Event
 	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, map[string]interface{}{
@@ -264,8 +274,12 @@ func (s *chatService) resolveLLMConfig(ctx context.Context, conv *model.Conversa
 		cfg, _ := s.llmRepo.GetByID(ctx, conv.ModelConfigID)
 		if cfg != nil { return cfg }
 	}
+	modelName := conv.ModelName
+	if modelName == "" {
+		modelName = s.cfg.DefaultChatModel
+	}
 	return &model.LLMConfig{
-		Provider: model.ProviderOllama, ModelName: conv.ModelName, BaseURL: s.ollamaClient.GetBaseURL(),
+		Provider: model.ProviderOllama, ModelName: modelName, BaseURL: s.ollamaClient.GetBaseURL(),
 	}
 }
 

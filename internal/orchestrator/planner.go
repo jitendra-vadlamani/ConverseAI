@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"ai-chat/internal/config"
 	"ai-chat/internal/model"
 	"ai-chat/internal/ollama"
 	"ai-chat/internal/manager"
@@ -18,12 +19,14 @@ type Planner interface {
 type ollamaPlanner struct {
 	client       ollama.Client
 	modelManager manager.ModelManager
+	cfg          *config.Config
 }
 
-func NewPlanner(client ollama.Client, modelManager manager.ModelManager) Planner {
+func NewPlanner(client ollama.Client, modelManager manager.ModelManager, cfg *config.Config) Planner {
 	return &ollamaPlanner{
 		client:       client,
 		modelManager: modelManager,
+		cfg:          cfg,
 	}
 }
 
@@ -34,21 +37,32 @@ func (p *ollamaPlanner) Plan(ctx context.Context, query string, modelName string
 		fmt.Printf("[Planner] Warning: PrepareModel failed: %v\n", err)
 	}
 
-	systemPrompt := `You are a Task Planner. Convert user queries into a JSON array of tasks.
+	systemPrompt := fmt.Sprintf(`You are a Task Planner. Convert user queries into a JSON array of tasks.
 Available Task Types: "summarize", "translate", "search", "analyze", "chat"
 
+Preferred Models for Tasks:
+- OCR: "%s"
+- Vision/Analysis: "%s"
+- Coding: "%s"
+- Translation: "%s"
+- General Chat: "%s"
+
 Vision Capability:
-If images are provided, you should prioritize vision-capable models (like "qwen3-vl:8b" or "deepseek-ocr:3b") for the first task to describe or extract text from the images.
+If images are provided, you should prioritize vision-capable models (like "%s" or "%s") for the first task to describe or extract text from the images.
 
 Rules:
 1. Return ONLY a JSON array of tasks.
-2. If the user is just having a conversation, return [{"type": "chat"}].
+2. If the user is just having a conversation, return [{"type": "chat", "model": "%s"}].
 3. Each task must have: "type", "model", "input".
 4. For translation tasks, explicitly state the target language in the "input" like: "Translate to Spanish. TEXT: {{PREVIOUS_OUTPUT}}".
 5. Use "{{PREVIOUS_OUTPUT}}" as input if it depends on the previous task.
 
 Example Result:
-[{"type": "analyze", "model": "qwen3-vl:8b", "input": "Describe this image"}, {"type": "translate", "model": "llama3", "input": "Translate the translation below to Spanish. TEXT: {{PREVIOUS_OUTPUT}}"}]`
+[{"type": "analyze", "model": "%s", "input": "Describe this image"}, {"type": "translate", "model": "%s", "input": "Translate the results to Spanish. TEXT: {{PREVIOUS_OUTPUT}}"}]`, 
+	p.cfg.DefaultOCRModel, p.cfg.DefaultVisionModel, p.cfg.DefaultCodingModel, p.cfg.DefaultTranslationModel, p.cfg.DefaultChatModel,
+	p.cfg.DefaultVisionModel, p.cfg.DefaultOCRModel,
+	p.cfg.DefaultChatModel,
+	p.cfg.DefaultVisionModel, p.cfg.DefaultTranslationModel)
 
 	var tasks []model.Task
 	var lastErr error

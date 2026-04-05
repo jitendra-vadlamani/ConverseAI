@@ -8,7 +8,7 @@
         "parameters_count": "8.0B",
         "embedding_length": 2560,
         "quantization": "Q4_K_M",
-        "capabilities": ["completion", "vision", "audio", "tools", "thinking"],
+        "capabilities": ["chat", "text", "vision", "audio", "tools", "thinking", "coding"],
         "temperature": 1.0,
         "top_k": 64,
         "top_p": 0.95
@@ -22,7 +22,7 @@
         "parameters_count": "3.3B",
         "embedding_length": 1280,
         "quantization": "F16",
-        "capabilities": ["completion", "vision"],
+        "capabilities": ["text", "vision", "ocr"],
         "temperature": 0.0
     },
     {
@@ -34,7 +34,7 @@
         "parameters_count": "8.8B",
         "embedding_length": 4096,
         "quantization": "Q4_K_M",
-        "capabilities": ["completion", "vision", "tools", "thinking"],
+        "capabilities": ["chat", "text", "vision", "tools", "thinking"],
         "temperature": 1.0,
         "top_k": 20,
         "top_p": 0.95
@@ -48,7 +48,7 @@
         "parameters_count": "12.2B",
         "embedding_length": 3840,
         "quantization": "Q4_K_M",
-        "capabilities": ["completion", "vision"],
+        "capabilities": ["text", "translation"],
         "top_p": 0.95,
         "top_k": 64,
         "stop_sequences": ["<end_of_turn>"]
@@ -62,7 +62,7 @@
         "parameters_count": "30.5B",
         "embedding_length": 2048,
         "quantization": "Q4_K_M",
-        "capabilities": ["completion", "tools"],
+        "capabilities": ["chat", "text", "coding", "tools"],
         "temperature": 0.7,
         "top_k": 20,
         "top_p": 0.8,
@@ -78,7 +78,7 @@
         "parameters_count": "20.9B",
         "embedding_length": 2880,
         "quantization": "MXFP4",
-        "capabilities": ["completion", "tools", "thinking"],
+        "capabilities": ["chat", "text", "tools", "thinking"],
         "temperature": 1.0
     },
     {
@@ -90,6 +90,17 @@
         "parameters_count": "8.2B",
         "embedding_length": 4096,
         "quantization": "Q4_K_M",
-        "capabilities": ["completion", "tools"]
+        "capabilities": ["chat", "text", "tools", "coding"]
+    },
+    {
+        "model_name": "nomic-embed-text-v2-moe:latest",
+        "name": "Nomic Embed Text v2 MoE",
+        "context_window": 8192,
+        "description": "Nomic's latest Mixture of Experts (MoE) embedding model for state-of-the-art vector performance.",
+        "architecture": "nomic-embed-text-v2-moe",
+        "parameters_count": "0.47B",
+        "embedding_length": 768,
+        "quantization": "F16",
+        "capabilities": ["embedding"]
     }
 ]

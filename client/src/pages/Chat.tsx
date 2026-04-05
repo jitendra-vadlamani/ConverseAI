@@ -229,19 +229,9 @@ export const Chat: React.FC = () => {
         ) : !currentConversation ? (
           <div className="welcome-container">
             <header className="chat-header">
-              <div className="model-selector">
-                <span className="model-label">Using:</span>
-                <select
-                  value={selectedModelId}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
-                >
-                  {llms.map(llm => (
-                    <option key={llm.config.id || llm.config.name} value={llm.config.id || llm.config.name}>
-                      {llm.config.name} ({llm.status})
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={14} className="selector-icon" />
+              <div className="model-info-badge">
+                <Brain size={14} />
+                <span>Auto-Routing Enabled</span>
               </div>
             </header>
             <div className="welcome-content">
@@ -277,20 +267,9 @@ export const Chat: React.FC = () => {
         ) : (
           <>
             <header className="chat-header">
-              <div className="model-selector">
-                <span className="model-label">Using:</span>
-                <select
-                  value={selectedModelId}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
-                  disabled={loading || !!currentConversation}
-                >
-                  {llms.map(llm => (
-                    <option key={llm.config.id || llm.config.name} value={llm.config.id || llm.config.name}>
-                      {llm.config.name} ({llm.config.model_name})
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={14} className="selector-icon" />
+              <div className="model-info-badge">
+                <Brain size={14} />
+                <span>Auto-Routing Enabled</span>
               </div>
             </header>
 
@@ -421,11 +400,7 @@ export const Chat: React.FC = () => {
         .conversation-item:hover .delete-conv-btn { opacity: 1; }
         
         .chat-main { flex: 1; display: flex; flex-direction: column; background: white; position: relative; }
-        .chat-header { padding: 0.5rem 1rem; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; }
-        .model-selector { display: flex; align-items: center; gap: 0.35rem; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 0.5rem; border: 1px solid #e2e8f0; position: relative; }
-        .model-label { font-size: 0.6875rem; color: #64748b; font-weight: 500; }
-        .model-selector select { background: none; border: none; font-size: 0.75rem; font-weight: 600; color: #1e293b; appearance: none; padding-right: 1.125rem; cursor: pointer; outline: none; }
-        .selector-icon { position: absolute; right: 0.35rem; pointer-events: none; color: #64748b; }
+        .model-info-badge { display: flex; align-items: center; gap: 0.4rem; background: #f0f9ff; padding: 0.3rem 0.75rem; border-radius: 2rem; border: 1px solid #bae6fd; font-size: 0.75rem; font-weight: 600; color: #0369a1; }
 
         .messages-container { flex: 1; overflow-y: auto; padding: 1rem 0; }
         .message-wrapper { width: 100%; padding: 0.75rem 1rem; }
