@@ -33,17 +33,17 @@ func LoadConfig() *Config {
 		log.Printf("Warning: .env file not found: %v", err)
 	}
 
-	return &Config{
+	cfg := &Config{
 		Port:                   getEnv("PORT", "8080"),
-		MongoURI:               getEnv("MONGO_URI", "mongodb://localhost:27017"),
+		MongoURI:               getEnv("MONGO_URI", "mongodb://converseai-db:27017"),
 		DBName:                 getEnv("DB_NAME", "ai_chat"),
 		JWTSecret:              getEnv("JWT_SECRET", "converseai"),
-		MinioEndpoint:          getEnv("MINIO_ENDPOINT", "localhost:9000"),
+		MinioEndpoint:          getEnv("MINIO_ENDPOINT", "converseai-storage:9000"),
 		MinioUser:              getEnv("MINIO_ROOT_USER", "admin"),
 		MinioPass:              getEnv("MINIO_ROOT_PASSWORD", "password123"),
 		MinioBucket:            getEnv("MINIO_BUCKET", "converseai"),
 		MinioSSL:               getEnv("MINIO_USE_SSL", "false") == "true",
-		ChromaURL:              getEnv("CHROMA_URL", "http://localhost:8000"),
+		ChromaURL:              getEnv("CHROMA_URL", "http://converseai-vector:8000"),
 		EmbeddingModel:         getEnv("EMBEDDING_MODEL", "nomic-embed-text-v2-moe:latest"),
 		DefaultPlannerModel:    getEnv("DEFAULT_PLANNER_MODEL", "gemma4:latest"),
 		DefaultChatModel:       getEnv("DEFAULT_CHAT_MODEL", "gemma4:latest"),
@@ -52,6 +52,12 @@ func LoadConfig() *Config {
 		DefaultCodingModel:     getEnv("DEFAULT_CODING_MODEL", "qwen3-coder:latest"),
 		DefaultTranslationModel: getEnv("DEFAULT_TRANSLATION_MODEL", "translategemma:12b"),
 	}
+
+	if cfg.JWTSecret == "converseai" {
+		log.Println("WARNING: Using default JWT secret. Set JWT_SECRET environment variable for production!")
+	}
+
+	return cfg
 }
 
 func getEnv(key, fallback string) string {

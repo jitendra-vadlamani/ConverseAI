@@ -10,7 +10,7 @@ import (
 )
 
 type Orchestrator interface {
-	Run(ctx context.Context, query string, modelName string, images []string, convID, userID primitive.ObjectID) (*model.OrchestrationResult, error)
+	Run(ctx context.Context, query string, modelName string, images []string, convID, userID primitive.ObjectID) (*model.OrchestrationResult, int, int, error)
 }
 
 type systemOrchestrator struct {
@@ -27,7 +27,7 @@ func NewOrchestrator(planner Planner, validator Validator, executor Executor) Or
 	}
 }
 
-func (o *systemOrchestrator) Run(ctx context.Context, query string, modelName string, images []string, convID, userID primitive.ObjectID) (*model.OrchestrationResult, error) {
+func (o *systemOrchestrator) Run(ctx context.Context, query string, modelName string, images []string, convID, userID primitive.ObjectID) (*model.OrchestrationResult, int, int, error) {
 	fmt.Printf("[Orchestrator] Starting multi-modal workflow for: %s\n", query)
 	
 	result := &model.OrchestrationResult{
@@ -35,13 +35,18 @@ func (o *systemOrchestrator) Run(ctx context.Context, query string, modelName st
 		StartTime: time.Now(),
 	}
 
+	totalInputTokens, totalOutputTokens := 0, 0
+
 	// 1. Plan using the dynamic model and images
-	tasks, err := o.planner.Plan(ctx, query, modelName, images)
+	tasks, inT, outT, err := o.planner.Plan(ctx, query, modelName, images)
+	totalInputTokens += inT
+	totalOutputTokens += outT
+
 	if err != nil {
 		fmt.Printf("[Orchestrator] Planning failed: %v\n", err)
 		result.Error = fmt.Sprintf("Planning failed: %v", err)
 		result.EndTime = time.Now()
-		return result, err
+		return result, totalInputTokens, totalOutputTokens, err
 	}
 	result.Plan = tasks
 
@@ -50,23 +55,24 @@ func (o *systemOrchestrator) Run(ctx context.Context, query string, modelName st
 		fmt.Printf("[Orchestrator] Validation failed: %v\n", err)
 		result.Error = fmt.Sprintf("Validation failed: %v", err)
 		result.EndTime = time.Now()
-		return result, err
+		return result, totalInputTokens, totalOutputTokens, err
 	}
 
 	// 3. Execute
-	updatedTasks, err := o.executor.Execute(ctx, tasks, convID, userID)
+	updatedTasks, execTokens, err := o.executor.Execute(ctx, tasks, convID, userID)
+	totalOutputTokens += execTokens // Executor tokens are mostly output generation
 	result.Plan = updatedTasks
 	if err != nil {
 		fmt.Printf("[Orchestrator] Execution failed: %v\n", err)
 		result.Error = fmt.Sprintf("Execution failed: %v", err)
 		result.EndTime = time.Now()
-		return result, err
+		return result, totalInputTokens, totalOutputTokens, err
 	}
 
 	// 4. Finalize
 	result.Success = true
 	result.EndTime = time.Now()
-	fmt.Printf("[Orchestrator] Workflow completed successfully for query: %s\n", query)
+	fmt.Printf("[Orchestrator] Workflow completed successfully for query: %s. Total tokens: %d\n", query, totalInputTokens+totalOutputTokens)
 
-	return result, nil
+	return result, totalInputTokens, totalOutputTokens, nil
 }

@@ -20,6 +20,8 @@ type ChatRepository interface {
 	UpdateTotalTokens(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
 	UpdateSummary(ctx context.Context, conversationID primitive.ObjectID, summary string, tokens int) error
 	MarkMessagesAsSummarized(ctx context.Context, conversationID primitive.ObjectID) error
+	UpdateLastMessageTokenCount(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
+	SetTotalTokens(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
 	DeleteConversation(ctx context.Context, id primitive.ObjectID) error
 }
 
@@ -125,6 +127,52 @@ func (r *MongoChatRepository) MarkMessagesAsSummarized(ctx context.Context, id p
 	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
 	if err != nil {
 		return fmt.Errorf("failed to mark messages as summarized: %w", err)
+	}
+	return nil
+}
+
+func (r *MongoChatRepository) UpdateLastMessageTokenCount(ctx context.Context, id primitive.ObjectID, tokens int) error {
+	// We use the aggregation framework to find the last message index and update it
+	// But simpler: just use index -1 if we can't reliably know the index without fetching.
+	// Actually, in Mongo 4.4+, we can use $[] with filters or $[] with positional-last if we had one.
+	// For simplicity in this demo, let's just fetch and update unless we want to use a more complex query.
+	// Alternative: Use a pipeline update (Mongo 4.2+)
+	
+	update := []bson.M{
+		{
+			"$set": bson.M{
+				"messages": bson.M{
+					"$concatArrays": []interface{}{
+						bson.M{"$slice": []interface{}{"$messages", bson.M{"$subtract": []interface{}{bson.M{"$size": "$messages"}, 1}}}},
+						[]bson.M{
+							{
+								"$mergeObjects": []interface{}{
+									bson.M{"$arrayElemAt": []interface{}{"$messages", -1}},
+									bson.M{"token_count": tokens},
+								},
+							},
+						},
+					},
+				},
+				"updated_at": time.Now(),
+			},
+		},
+	}
+	
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	return err
+}
+
+func (r *MongoChatRepository) SetTotalTokens(ctx context.Context, id primitive.ObjectID, tokens int) error {
+	update := bson.M{
+		"$set": bson.M{
+			"total_tokens": tokens,
+			"updated_at":   time.Now(),
+		},
+	}
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
+		return fmt.Errorf("failed to set total tokens: %w", err)
 	}
 	return nil
 }

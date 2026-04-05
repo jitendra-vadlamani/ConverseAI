@@ -10,7 +10,7 @@ services:
       - converseai_db_data:/data/db
     restart: always
 
-  minio:
+  converseai-storage:
     image: minio/minio:latest
     container_name: converseai-storage
     command: server /data --console-address ":9001"
@@ -26,7 +26,7 @@ services:
       - converseai-net
     restart: always
 
-  chromadb:
+  converseai-vector:
     image: chromadb/chroma:latest
     container_name: converseai-vector
     volumes:
@@ -48,12 +48,12 @@ services:
       - DB_NAME=${DB_NAME:-ai_chat}
       - JWT_SECRET=${JWT_SECRET}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-converseai-storage:9000}
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password123}
       - MINIO_BUCKET=${MINIO_BUCKET:-converseai}
       - MINIO_USE_SSL=false
-      - CHROMA_URL=${CHROMA_URL:-http://chromadb:8000}
+      - CHROMA_URL=${CHROMA_URL:-http://converseai-vector:8000}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - DEFAULT_PLANNER_MODEL=${DEFAULT_PLANNER_MODEL}
       - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL}
@@ -67,8 +67,8 @@ services:
       - converseai-net
     depends_on:
       - converseai-db
-      - minio
-      - chromadb
+      - converseai-storage
+      - converseai-vector
 
 networks:
   converseai-net:

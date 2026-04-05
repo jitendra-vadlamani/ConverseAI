@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"ai-chat/internal/middleware"
 	"ai-chat/internal/model"
 	"ai-chat/internal/service"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -25,7 +26,7 @@ func (h *LLMHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, _ := r.Context().Value("userID").(string)
+	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
 	models, err := h.llmService.ListModels(r.Context(), userID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

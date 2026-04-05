@@ -15,7 +15,7 @@ import (
 
 type RagService interface {
 	Ingest(ctx context.Context, userID, fileID, filename string, content string) error
-	Search(ctx context.Context, userID string, query string, topK int) ([]string, error)
+	Search(ctx context.Context, userID string, query string, topK int, fileIDs []string) ([]string, error)
 	DeleteFileKnowledge(ctx context.Context, userID, fileID string) error
 	DeleteUserKnowledge(ctx context.Context, userID string) error
 }
@@ -69,7 +69,7 @@ func (s *ragService) Ingest(ctx context.Context, userID, fileID, filename string
 	return nil
 }
 
-func (s *ragService) Search(ctx context.Context, userID string, query string, topK int) ([]string, error) {
+func (s *ragService) Search(ctx context.Context, userID string, query string, topK int, fileIDs []string) ([]string, error) {
 	collectionName := fmt.Sprintf("user-knowledge-%s", userID)
 	collectionID, err := s.getCollectionID(ctx, collectionName)
 	if err != nil {
@@ -85,7 +85,7 @@ func (s *ragService) Search(ctx context.Context, userID string, query string, to
 		return nil, err
 	}
 
-	return s.queryChroma(ctx, collectionID, embResp.Embedding, topK)
+	return s.queryChroma(ctx, collectionID, embResp.Embedding, topK, fileIDs)
 }
 
 func (s *ragService) DeleteFileKnowledge(ctx context.Context, userID, fileID string) error {
@@ -194,12 +194,21 @@ func (s *ragService) addToChroma(ctx context.Context, collectionID, id, document
 	return nil
 }
 
-func (s *ragService) queryChroma(ctx context.Context, collectionID string, embedding []float64, topK int) ([]string, error) {
+func (s *ragService) queryChroma(ctx context.Context, collectionID string, embedding []float64, topK int, fileIDs []string) ([]string, error) {
 	url := fmt.Sprintf("%s/api/v1/collections/%s/query", s.chromaURL, collectionID)
 	
 	payload := map[string]interface{}{
 		"query_embeddings": [][]float64{embedding},
 		"n_results":        topK,
+	}
+
+	// Add Metadata Filtering if fileIDs are specified
+	if len(fileIDs) > 0 {
+		payload["where"] = map[string]interface{}{
+			"file_id": map[string]interface{}{
+				"$in": fileIDs,
+			},
+		}
 	}
 	
 	body, _ := json.Marshal(payload)

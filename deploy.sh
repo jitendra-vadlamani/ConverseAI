@@ -13,6 +13,8 @@ MONGO_URI=${MONGO_URI:-mongodb://converseai-db:27017}
 DB_NAME=${DB_NAME:-ai_chat}
 JWT_SECRET=${JWT_SECRET:-your-secret-key}
 OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+MINIO_ENDPOINT=${MINIO_ENDPOINT:-converseai-storage:9000}
+CHROMA_URL=${CHROMA_URL:-http://converseai-vector:8000}
 
 # MinIO Config
 MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
@@ -81,12 +83,12 @@ docker run -d \
     -e DB_NAME=$DB_NAME \
     -e JWT_SECRET=$JWT_SECRET \
     -e OLLAMA_BASE_URL=$OLLAMA_BASE_URL \
-    -e MINIO_ENDPOINT=converseai-storage:9000 \
+    -e MINIO_ENDPOINT=$MINIO_ENDPOINT \
     -e MINIO_ROOT_USER=$MINIO_ROOT_USER \
     -e MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD \
     -e MINIO_BUCKET=$MINIO_BUCKET \
     -e MINIO_USE_SSL=false \
-    -e CHROMA_URL=http://converseai-vector:8000 \
+    -e CHROMA_URL=$CHROMA_URL \
     -e EMBEDDING_MODEL=$EMBEDDING_MODEL \
     -e DEFAULT_PLANNER_MODEL=$DEFAULT_PLANNER_MODEL \
     -e DEFAULT_CHAT_MODEL=$DEFAULT_CHAT_MODEL \

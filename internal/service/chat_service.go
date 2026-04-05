@@ -2,7 +2,6 @@ package service
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -18,10 +17,9 @@ import (
 	"ai-chat/internal/orchestrator"
 	"ai-chat/internal/manager"
 	"ai-chat/internal/repository"
+	"ai-chat/internal/events"
 	"ai-chat/internal/storage"
 	"ai-chat/internal/util"
-	"ai-chat/internal/events"
-	"github.com/ledongthuc/pdf"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -46,13 +44,15 @@ type chatService struct {
 	eventRepo      repository.EventRepository
 	eventBroker    events.EventBroker
 	ragService     RagService
+	systemRepo     repository.SystemLLMRepository
 	cfg            *config.Config
 }
 
-func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
+func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
 	return &chatService{
 		repo:           repo,
 		llmRepo:        llmRepo,
+		systemRepo:     systemRepo,
 		ollamaClient:   ollamaClient,
 		modelManager:   modelManager,
 		orchestrator:   orch,
@@ -131,7 +131,12 @@ func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 		}
 	}
 
-	// 3. Delete from DB
+	// 3. Delete related events
+	if err := s.eventRepo.DeleteEventsByConversationID(ctx, objID); err != nil {
+		log.Printf("[ChatService] Warning: Failed to delete events for tracking conversation %s: %v", objID.Hex(), err)
+	}
+
+	// 4. Delete from DB
 	return s.repo.DeleteConversation(ctx, objID)
 }
 
@@ -164,6 +169,8 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		return fmt.Errorf("no model configuration found")
 	}
 
+	var userTokenCount, aiTokenCount int
+
 	// 1. Resolve attachments from Storage
 	images, extraContext, err := s.resolveAttachments(tCtx, conv.UserID.Hex(), attachmentIDs)
 	if err != nil {
@@ -172,7 +179,8 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 
 	// 2. RAG Semantic Search
 	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchStarted, map[string]interface{}{"query": prompt})
-	ragContext, err := s.ragService.Search(tCtx, conv.UserID.Hex(), prompt, 5)
+	
+	ragContext, err := s.ragService.Search(tCtx, conv.UserID.Hex(), prompt, 10, attachmentIDs)
 	if err != nil {
 		log.Printf("[ChatService] Warning: RAG search failed: %v", err)
 	}
@@ -191,37 +199,52 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		"prompt": prompt, "attachments": attachmentIDs,
 	})
 
-	// 3. Save User Message
-	userTokenCount := util.CountTokens(finalPrompt)
+	// 4. Handle Summarization BEFORE adding new user message
+	s.handleSummarization(tCtx, llmConfig, conv)
+	conv, _ = s.repo.GetConversationByID(tCtx, conv.ID) // Reload to ensure we have latest history shape
+
+	// 5. Add User Message to History (so it NEVER gets summarized on the current turn)
 	if err := s.repo.AddMessage(context.Background(), conv.ID, model.Message{
-		Role: model.RoleUser, Content: finalPrompt, Attachments: attachmentIDs, TokenCount: userTokenCount, CreatedAt: time.Now(),
+		Role: model.RoleUser, Content: finalPrompt, Attachments: attachmentIDs, TokenCount: 0, CreatedAt: time.Now(),
 	}); err != nil {
 		return err
 	}
+	// Reload again to securely include the newly appended message into the `conv` context list which is sent to LLM
+	conv, _ = s.repo.GetConversationByID(tCtx, conv.ID)
 
-	// 4. Handle Summarization
-	s.handleSummarization(tCtx, llmConfig, conv, userTokenCount)
-	conv, _ = s.repo.GetConversationByID(tCtx, conv.ID) // Reload
-
-	// 5. Planning & Orchestration Routing
-	onThought("[Planning] Analyzing request and attachments...\n")
-	plannerModel := llmConfig.ModelName
-	if plannerModel == "" {
-		plannerModel = s.cfg.DefaultPlannerModel
-	}
-	plan, err := s.planner.Plan(tCtx, finalPrompt, plannerModel, images)
-	
-	// Emit Planning Event
-	eventPayload := map[string]interface{}{"plan": plan}
-	if err != nil {
-		eventPayload["error"] = err.Error()
-	}
-	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, eventPayload)
+	// 5. Smart Routing: decide if we need orchestration or can go straight to chat
+	//
+	// The file content and RAG results are ALREADY injected into finalPrompt above,
+	// so direct chat naturally handles "what's in this PDF?" style questions.
+	// We only invoke the expensive LLM planner for detected multi-step queries.
 
 	isOrchestration := false
-	if err == nil && len(plan) > 0 {
-		if len(plan) > 1 || plan[0].Type != model.TaskChat {
-			isOrchestration = true
+	var plan []model.Task
+
+	if needsOrchestration(prompt) {
+		onThought("[Planning] Multi-step request detected, analyzing...\n")
+		plannerModel := llmConfig.ModelName
+		if plannerModel == "" {
+			plannerModel = s.cfg.DefaultPlannerModel
+		}
+
+		var inT, outT int
+		plan, inT, outT, err = s.planner.Plan(tCtx, finalPrompt, plannerModel, images)
+		userTokenCount += inT
+		aiTokenCount += outT
+
+		// Emit Planning Event
+		eventPayload := map[string]interface{}{"plan": plan}
+		if err != nil {
+			eventPayload["error"] = err.Error()
+		}
+		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, eventPayload)
+
+		// Safety net: if planner returns a single chat task, fall back to direct chat
+		if err == nil && len(plan) > 0 {
+			if len(plan) > 1 || plan[0].Type != model.TaskChat {
+				isOrchestration = true
+			}
 		}
 	}
 
@@ -230,10 +253,16 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	if isOrchestration {
 		onThought(fmt.Sprintf("[Orchestration] Executing %d tasks...\n", len(plan)))
 		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationStarted, map[string]interface{}{
-			"task_count": len(plan),
+			"task_index": len(plan),
 		})
 
-		result, err := s.orchestrator.Run(tCtx, finalPrompt, llmConfig.ModelName, images, conv.ID, conv.UserID)
+		var result *model.OrchestrationResult
+		var orchErr error
+		var inT, outT int
+		result, inT, outT, orchErr = s.orchestrator.Run(tCtx, finalPrompt, llmConfig.ModelName, images, conv.ID, conv.UserID)
+		userTokenCount += inT
+		aiTokenCount += outT
+		err = orchErr
 		
 		eventPayload := map[string]interface{}{"success": err == nil}
 		if err != nil {
@@ -261,14 +290,16 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		}
 
 		onThought("[Conversation] Starting standard chat...\n")
-		fullAIResponse, fullReasoning, err = s.processStream(tCtx, llmConfig, conv, finalPrompt, images, onThought, onDelta)
+		var inputTokens, outputTokens int
+		fullAIResponse, fullReasoning, inputTokens, outputTokens, err = s.processStream(tCtx, llmConfig, conv, finalPrompt, images, onThought, onDelta)
 		if err != nil {
 			return err
 		}
+		userTokenCount = inputTokens
+		aiTokenCount = outputTokens
 	}
 
 	// 6. Save Assistant Message
-	aiTokenCount := util.CountTokens(fullAIResponse + fullReasoning)
 	s.repo.AddMessage(context.Background(), conv.ID, model.Message{
 		Role: model.RoleAssistant, Content: fullAIResponse, Reasoning: fullReasoning, TokenCount: aiTokenCount, CreatedAt: time.Now(),
 	})
@@ -278,7 +309,25 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		"token_count": aiTokenCount,
 	})
 
-	return s.repo.UpdateTotalTokens(context.Background(), conv.ID, userTokenCount+aiTokenCount)
+	// Update User Message Token Count and Total Context
+	if isOrchestration {
+		// Orchestrator tokens are background processing tokens.
+		// Approximate standard history context size to prevent premature summarization.
+		userMsgTokens := len(finalPrompt) / 4
+		aiMsgTokens := len(fullAIResponse) / 4
+		s.repo.UpdateLastMessageTokenCount(context.Background(), conv.ID, userMsgTokens)
+		return s.repo.UpdateTotalTokens(context.Background(), conv.ID, userMsgTokens+aiMsgTokens)
+	} else {
+		// Standard chat: userTokenCount represents the ENTIRE context window + new prompt
+		newUserTokens := userTokenCount - conv.TotalTokens
+		if newUserTokens < 0 {
+			newUserTokens = len(finalPrompt) / 4
+		}
+		s.repo.UpdateLastMessageTokenCount(context.Background(), conv.ID, newUserTokens)
+		
+		// Since PromptEvalCount encompasses everything up to the user message, memory size = input + output
+		return s.repo.SetTotalTokens(context.Background(), conv.ID, userTokenCount+aiTokenCount)
+	}
 }
 
 func (s *chatService) resolveLLMConfig(ctx context.Context, conv *model.Conversation) *model.LLMConfig {
@@ -290,15 +339,24 @@ func (s *chatService) resolveLLMConfig(ctx context.Context, conv *model.Conversa
 	if modelName == "" {
 		modelName = s.cfg.DefaultChatModel
 	}
-	return &model.LLMConfig{
+
+	cfg := &model.LLMConfig{
 		Provider: model.ProviderOllama, ModelName: modelName, BaseURL: s.ollamaClient.GetBaseURL(),
 	}
+	
+	if meta := s.systemRepo.GetMetadata(modelName); meta != nil {
+		cfg.ContextWindow = meta.ContextWindow
+	}
+	return cfg
 }
 
-func (s *chatService) handleSummarization(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, userTokenCount int) {
+func (s *chatService) handleSummarization(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation) {
 	maxContext := cfg.ContextWindow
-	if maxContext == 0 { maxContext = 2048 }
-	if conv.TotalTokens+userTokenCount > int(float64(maxContext)*0.9) {
+	if maxContext == 0 { maxContext = 4096 } // Default safety
+	
+	// If the history already consumes 85% of the context, summarize before sending the next one
+	if conv.TotalTokens > int(float64(maxContext)*0.85) {
+		log.Printf("[ChatService] Context threshold reached (%d/%d), triggering summarization\n", conv.TotalTokens, maxContext)
 		s.triggerSummarization(ctx, cfg, conv)
 	}
 }
@@ -315,12 +373,12 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 		}
 
 		ext := strings.ToLower(filepath.Ext(id))
-		if isImage(ext) {
+		if util.IsImage(ext) {
 			images = append(images, base64.StdEncoding.EncodeToString(data))
-		} else if isText(ext) || ext == ".pdf" {
+		} else if util.IsText(ext) || ext == ".pdf" {
 			textContent := ""
 			if ext == ".pdf" {
-				textContent, _ = extractTextFromPDF(data)
+				textContent, _ = util.ExtractTextFromPDF(data)
 			} else {
 				textContent = string(data)
 			}
@@ -335,7 +393,10 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 					}
 				}(userID, id, id, textContent)
 				
-				extraContext.WriteString(fmt.Sprintf("\n(Large file '%s' indexed for semantic search)\n", id))
+				// Add a preview of the large file to the context
+				previewLen := 4000
+				if len(textContent) < previewLen { previewLen = len(textContent) }
+				extraContext.WriteString(fmt.Sprintf("\n(Large file '%s' indexed for semantic search. Preview: %s...)\n", id, textContent[:previewLen]))
 			} else {
 				// Small files are injected directly
 				label := "FILE"
@@ -349,47 +410,12 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 	return images, extraContext.String(), nil
 }
 
-func extractTextFromPDF(data []byte) (string, error) {
-	r := bytes.NewReader(data)
-	pdfReader, err := pdf.NewReader(r, int64(len(data)))
-	if err != nil {
-		return "", err
-	}
 
-	var buf bytes.Buffer
-	for i := 1; i <= pdfReader.NumPage(); i++ {
-		p := pdfReader.Page(i)
-		if p.V.IsNull() {
-			continue
-		}
-		text, err := p.GetPlainText(nil)
-		if err != nil {
-			continue
-		}
-		buf.WriteString(text)
-	}
-	return buf.String(), nil
-}
 
-func isImage(ext string) bool {
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
-		return true
-	}
-	return false
-}
-
-func isText(ext string) bool {
-	switch ext {
-	case ".txt", ".csv", ".json", ".md", ".go", ".py", ".js", ".ts":
-		return true
-	}
-	return false
-}
-
-func (s *chatService) processStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, prompt string, images []string, onThought, onDelta func(string)) (string, string, error) {
+func (s *chatService) processStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, prompt string, images []string, onThought, onDelta func(string)) (string, string, int, int, error) {
 	fullReasoning, fullAIResponse := "", ""
 	isThinking := false
+	inputTokens, outputTokens := 0, 0
 	
 	err := s.callLLMStream(ctx, cfg, conv, images, func(chunk string) {
 		cleanChunk := chunk
@@ -419,11 +445,14 @@ func (s *chatService) processStream(ctx context.Context, cfg *model.LLMConfig, c
 			fullAIResponse += cleanChunk
 			onDelta(cleanChunk)
 		}
+	}, func(inT, outT int) {
+		inputTokens = inT
+		outputTokens = outT
 	})
-	return fullAIResponse, fullReasoning, err
+	return fullAIResponse, fullReasoning, inputTokens, outputTokens, err
 }
 
-func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, images []string, onChunk func(string)) error {
+func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation, images []string, onChunk func(string), onMeta func(int, int)) error {
 	if cfg.Provider == model.ProviderOllama {
 		messages := s.prepareMessages(ctx, conv)
 		// If images were passed for the CURRENT prompt, add them to the last message
@@ -440,10 +469,20 @@ func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, c
 
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
-			var line struct { Message struct { Content string `json:"content"` } `json:"message"`; Done bool `json:"done"` }
+			var line struct { 
+				Message struct { Content string `json:"content"` } `json:"message"`
+				Done    bool `json:"done"`
+				PromptEvalCount int `json:"prompt_eval_count"`
+				EvalCount       int `json:"eval_count"`
+			}
 			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
-				onChunk(line.Message.Content)
-				if line.Done { break }
+				if line.Message.Content != "" {
+					onChunk(line.Message.Content)
+				}
+				if line.Done { 
+					onMeta(line.PromptEvalCount, line.EvalCount)
+					break 
+				}
 			}
 		}
 		return nil
@@ -473,12 +512,68 @@ func (s *chatService) triggerSummarization(ctx context.Context, cfg *model.LLMCo
 	s.emitEvent(ctx, conv.ID, conv.UserID, model.EventSummarizationStarted, map[string]interface{}{"history_len": len(historyText)})
 	resp, _ := s.ollamaClient.Generate(ctx, &ollama.GenerateRequest{
 		Model: cfg.ModelName, Prompt: prompt, Stream: false,
+		Options: map[string]interface{}{"num_ctx": cfg.ContextWindow},
 	})
 	if resp != nil && resp.Response != "" {
-		summaryTokens := util.CountTokens(resp.Response)
+		summaryTokens := resp.EvalCount
 		s.repo.UpdateSummary(ctx, conv.ID, resp.Response, summaryTokens)
 		s.repo.MarkMessagesAsSummarized(ctx, conv.ID)
-		s.repo.UpdateTotalTokens(ctx, conv.ID, -(conv.TotalTokens - summaryTokens))
+		s.repo.SetTotalTokens(ctx, conv.ID, summaryTokens)
 		s.emitEvent(ctx, conv.ID, conv.UserID, model.EventSummarizationFinished, map[string]interface{}{"summary_tokens": summaryTokens})
 	}
+}
+
+// needsOrchestration performs a lightweight keyword check to determine if a user
+// prompt requires multi-step orchestration. This avoids calling the expensive
+// LLM-based planner for the vast majority of messages.
+//
+// Returns true only when the prompt shows clear multi-step intent — i.e., it
+// contains BOTH a task-type keyword AND a chaining/sequencing keyword.
+func needsOrchestration(prompt string) bool {
+	lower := strings.ToLower(prompt)
+
+	// Task-type keywords — things the orchestrator can actually decompose
+	taskKeywords := []string{
+		"summarize", "translate", "analyze", "search for",
+		"convert", "extract", "compare", "ocr",
+	}
+
+	// Chaining keywords — indicate multi-step intent
+	chainKeywords := []string{
+		"then", "and then", "after that", "next", "step by step",
+		"first", "finally", "followed by", "and also",
+	}
+
+	hasTask := false
+	for _, kw := range taskKeywords {
+		if strings.Contains(lower, kw) {
+			hasTask = true
+			break
+		}
+	}
+
+	if !hasTask {
+		return false
+	}
+
+	// A single task keyword alone isn't enough — "summarize this" can be handled
+	// by direct chat. We need chaining intent for orchestration.
+	for _, kw := range chainKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+
+	// Special case: two or more distinct task keywords suggest multi-step
+	taskCount := 0
+	for _, kw := range taskKeywords {
+		if strings.Contains(lower, kw) {
+			taskCount++
+		}
+	}
+	if taskCount >= 2 {
+		return true
+	}
+
+	return false
 }

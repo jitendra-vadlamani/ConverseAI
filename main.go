@@ -7,7 +7,11 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"ai-chat/internal/config"
 	"ai-chat/internal/database"
@@ -63,21 +67,21 @@ func main() {
 	})
 
 	// 2. Initialize Orchestrator
-	planner := orchestrator.NewPlanner(ollamaClient, modelManager, cfg)
+	planner := orchestrator.NewPlanner(ollamaClient, modelManager, systemLLMRepo, cfg)
 	validator := orchestrator.NewValidator(systemLLMRepo)
-	executor := orchestrator.NewExecutor(ollamaClient, modelManager, storageService, eventRepo, eventBroker)
+	executor := orchestrator.NewExecutor(ollamaClient, modelManager, storageService, eventRepo, eventBroker, systemLLMRepo)
 	orch := orchestrator.NewOrchestrator(planner, validator, executor)
 
 	// 3. Initialize Services
 	authService := service.NewAuthService(userRepo, cfg)
 	llmService := service.NewLLMService(llmRepo, systemLLMRepo, ollamaClient)
 	ragService := service.NewRagService(cfg, ollamaClient)
-	chatService := service.NewChatService(chatRepo, llmRepo, ollamaClient, modelManager, orch, planner, storageService, eventRepo, eventBroker, ragService, cfg)
+	chatService := service.NewChatService(chatRepo, llmRepo, systemLLMRepo, ollamaClient, modelManager, orch, planner, storageService, eventRepo, eventBroker, ragService, cfg)
 
 	// 4. Initialize Handlers
 	authHandler := handler.NewAuthHandler(authService)
 	llmHandler := handler.NewLLMHandler(llmService)
-	chatHandler := handler.NewChatHandler(chatService, storageService)
+	chatHandler := handler.NewChatHandler(chatService, storageService, eventBroker)
 	orchHandler := handler.NewOrchestratorHandler(orch)
 
 	// 5. Setup Routes
@@ -126,8 +130,39 @@ func main() {
 		w.Write(indexHTML)
 	})
 
-	log.Printf("Server starting on :%s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, middleware.Logger(mux)); err != nil {
-		log.Fatal(err)
+	// Graceful Shutdown
+	server := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: middleware.Logger(mux),
 	}
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("Server starting on :%s", cfg.Port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down server...")
+
+	// Give active connections 10 seconds to drain
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+
+	// Disconnect MongoDB
+	if err := db.Client.Disconnect(shutdownCtx); err != nil {
+		log.Printf("MongoDB disconnect error: %v", err)
+	}
+
+	log.Println("Server exited gracefully")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"ai-chat/internal/config"
@@ -35,6 +36,15 @@ func NewAuthService(repo repository.UserRepository, cfg *config.Config) AuthServ
 }
 
 func (s *authService) Register(ctx context.Context, email, password string) (*model.User, error) {
+	// Input validation
+	email = strings.TrimSpace(email)
+	if email == "" || !strings.Contains(email, "@") || !strings.Contains(email, ".") {
+		return nil, errors.New("invalid email address")
+	}
+	if len(password) < 8 {
+		return nil, errors.New("password must be at least 8 characters")
+	}
+
 	// Check if user already exists
 	existingUser, _ := s.repo.GetByEmail(ctx, email)
 	if existingUser != nil {

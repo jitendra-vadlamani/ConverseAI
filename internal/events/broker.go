@@ -53,6 +53,7 @@ func (b *eventBroker) Unsubscribe(conversationID primitive.ObjectID, ch <-chan m
 	if chans, ok := b.subscribers[conversationID]; ok {
 		for i, c := range chans {
 			if c == ch {
+				close(c) // Close the channel so consumers detect the disconnect
 				b.subscribers[conversationID] = append(chans[:i], chans[i+1:]...)
 				break
 			}

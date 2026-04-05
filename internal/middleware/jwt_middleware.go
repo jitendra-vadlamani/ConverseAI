@@ -7,6 +7,12 @@ import (
 	"ai-chat/internal/service"
 )
 
+// ContextKey is an unexported type for context keys to avoid collisions.
+type ContextKey string
+
+// UserIDKey is the context key used to store the authenticated user's ID.
+const UserIDKey ContextKey = "userID"
+
 type Middleware struct {
 	authService service.AuthService
 }
@@ -31,8 +37,8 @@ func (m *Middleware) JWTMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Add userID to context
-		ctx := context.WithValue(r.Context(), "userID", userID)
+		// Add userID to context using typed key
+		ctx := context.WithValue(r.Context(), UserIDKey, userID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 }

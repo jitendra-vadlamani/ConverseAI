@@ -31,18 +31,21 @@ type EmbeddingsResponse struct {
 }
 
 type GenerateRequest struct {
-	Model     string   `json:"model"`
-	Prompt    string   `json:"prompt"`
-	Stream    bool     `json:"stream"`
-	System    string   `json:"system,omitempty"`
-	Format    string   `json:"format,omitempty"`
-	Images    []string `json:"images,omitempty"`
-	KeepAlive int      `json:"keep_alive,omitempty"`
+	Model     string                 `json:"model"`
+	Prompt    string                 `json:"prompt"`
+	Stream    bool                   `json:"stream"`
+	System    string                 `json:"system,omitempty"`
+	Format    string                 `json:"format,omitempty"`
+	Images    []string               `json:"images,omitempty"`
+	Options   map[string]interface{} `json:"options,omitempty"`
+	KeepAlive int                    `json:"keep_alive,omitempty"`
 }
 
 type GenerateResponse struct {
-	Response string `json:"response"`
-	Done     bool   `json:"done"`
+	Response          string `json:"response"`
+	Done              bool   `json:"done"`
+	PromptEvalCount   int    `json:"prompt_eval_count,omitempty"`
+	EvalCount         int    `json:"eval_count,omitempty"`
 }
 
 type ChatMessage struct {
@@ -115,8 +118,19 @@ func (c *ollamaClient) Chat(ctx context.Context, req *ChatRequest) (*http.Respon
 		return nil, err
 	}
 
+	resp, err := c.httpClient.Do(hReq)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for HTTP error status before returning the stream
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("ollama chat failed with status %d", resp.StatusCode)
+	}
+
 	// We return the raw response so the caller can process the stream
-	return c.httpClient.Do(hReq)
+	return resp, nil
 }
 
 func (c *ollamaClient) Tags(ctx context.Context) ([]string, error) {

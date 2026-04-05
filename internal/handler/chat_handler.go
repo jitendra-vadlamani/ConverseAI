@@ -1,26 +1,31 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"bytes"
 
+	"ai-chat/internal/events"
+	"ai-chat/internal/middleware"
 	"ai-chat/internal/service"
 	"ai-chat/internal/storage"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type ChatHandler struct {
 	chatService    service.ChatService
 	storageService storage.StorageService
+	eventBroker    events.EventBroker
 }
 
-func NewChatHandler(chatService service.ChatService, storageService storage.StorageService) *ChatHandler {
+func NewChatHandler(chatService service.ChatService, storageService storage.StorageService, eventBroker events.EventBroker) *ChatHandler {
 	return &ChatHandler{
 		chatService:    chatService,
 		storageService: storageService,
+		eventBroker:    eventBroker,
 	}
 }
 
@@ -30,7 +35,7 @@ func (h *ChatHandler) ListConversations(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	userID, ok := r.Context().Value("userID").(string)
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
 		log.Printf("[ChatHandler] Unauthorized access to ListConversations")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -54,6 +59,12 @@ func (h *ChatHandler) GetConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
@@ -67,6 +78,13 @@ func (h *ChatHandler) GetConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// IDOR protection: verify conversation belongs to the authenticated user
+	uID, _ := primitive.ObjectIDFromHex(userID)
+	if conversation.UserID != uID {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(conversation)
 }
@@ -77,7 +95,7 @@ func (h *ChatHandler) CreateConversation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	userID, _ := r.Context().Value("userID").(string)
+	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
 
 	var req struct {
 		ModelConfigID string `json:"model_config_id"`
@@ -109,7 +127,7 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	userID, ok := r.Context().Value("userID").(string)
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -172,40 +190,32 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := make(chan string)
-	errChan := make(chan error, 1)
+	// Run the completion synchronously in a goroutine and wait for it to finish
+	// before sending [DONE]. The callbacks write directly to the ResponseWriter.
+	doneChan := make(chan error, 1)
 
 	go func() {
-		err := h.chatService.StreamCompletion(r.Context(), conversationID, content, attachmentIDs, func(thought string) {
+		doneChan <- h.chatService.StreamCompletion(r.Context(), conversationID, content, attachmentIDs, func(thought string) {
 			fmt.Fprintf(w, "event: thought\ndata: %s\n\n", thought)
 			flusher.Flush()
 		}, func(delta string) {
 			fmt.Fprintf(w, "data: %s\n\n", delta)
 			flusher.Flush()
 		})
-		if err != nil {
-			errChan <- err
-		}
-		close(out)
 	}()
 
-	for {
-		select {
-		case chunk, ok := <-out:
-			if !ok {
-				fmt.Fprint(w, "event: end\ndata: [DONE]\n\n")
-				flusher.Flush()
-				return
-			}
-			fmt.Fprintf(w, "data: %s\n\n", chunk)
-			flusher.Flush()
-		case err := <-errChan:
+	// Wait for the completion goroutine to finish or the client to disconnect
+	select {
+	case err := <-doneChan:
+		if err != nil {
 			fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
 			flusher.Flush()
-			return
-		case <-r.Context().Done():
-			return
 		}
+		fmt.Fprint(w, "event: end\ndata: [DONE]\n\n")
+		flusher.Flush()
+	case <-r.Context().Done():
+		// Client disconnected
+		return
 	}
 }
 
@@ -215,7 +225,30 @@ func (h *ChatHandler) DeleteConversation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
+		return
+	}
+
+	// IDOR protection: verify conversation belongs to the authenticated user
+	conv, err := h.chatService.GetConversation(r.Context(), id)
+	if err != nil || conv == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	uID, _ := primitive.ObjectIDFromHex(userID)
+	if conv.UserID != uID {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
 	if err := h.chatService.DeleteConversation(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -230,9 +263,27 @@ func (h *ChatHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
+		return
+	}
+
+	// IDOR protection: verify conversation belongs to the authenticated user
+	conv, err := h.chatService.GetConversation(r.Context(), id)
+	if err != nil || conv == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	uID, _ := primitive.ObjectIDFromHex(userID)
+	if conv.UserID != uID {
+		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
 
@@ -270,6 +321,10 @@ func (h *ChatHandler) StreamEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Ensure we clean up the subscription when the client disconnects
+	cID, _ := primitive.ObjectIDFromHex(id)
+	defer h.eventBroker.Unsubscribe(cID, stream)
 
 	for {
 		select {

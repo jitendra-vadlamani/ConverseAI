@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Hash, Paperclip, File as FileIcon, X } from 'lucide-react';
+import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Paperclip, File as FileIcon, X } from 'lucide-react';
 // import { getEncoding } from 'js-tiktoken';
 import { listLLMsApi, type LLMInfo } from '../api/llm';
 import {
@@ -386,7 +386,7 @@ export const Chat: React.FC = () => {
                 {currentConversation.summary && (
                   <div className="summary-banner">
                     <Brain size={16} />
-                    <span>Long-term memory active: {currentConversation.summary_token_count} tokens condensed into a summary.</span>
+                    <span>Long-term memory active: Conversation condensed into a summary.</span>
                   </div>
                 )}
                 {currentConversation.messages.map((msg, i) => (
@@ -400,19 +400,9 @@ export const Chat: React.FC = () => {
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
                           {msg.content}
                         </ReactMarkdown>
-                        <div className="message-meta-row">
-                          {msg.is_summarized && (
-                            <span className="summarized-tag">Summarized</span>
-                          )}
-                          {msg.token_count !== undefined && msg.token_count > 0 && (
-                            <div className="message-token-count">
-                              {msg.token_count} tokens
-                            </div>
-                          )}
                         </div>
                       </div>
                     </div>
-                  </div>
                 ))}
 
                 {(streamingContent || streamingThought) && (
@@ -468,19 +458,7 @@ export const Chat: React.FC = () => {
 
             <footer className="chat-input-area">
               <div className="input-container-wrapper">
-                {(() => {
-                  const selectedModel = llms.find(m => (m.config.id || m.config.name) === selectedModelId);
-                  const used = currentConversation?.total_tokens || 0;
-                  const max = selectedModel?.config.context_window || 2048;
-                  const remaining = max - used;
 
-                  return currentConversation && (
-                    <div className="chat-context-indicator" title={`Max: ${max} tokens | Remaining: ${remaining} tokens`}>
-                      <Hash size={12} />
-                      <span>{used} / {max} tokens used ({Math.max(0, remaining)} remaining)</span>
-                    </div>
-                  );
-                })()}
                 <div className="input-container">
                   <div className="input-actions-left">
                     <input

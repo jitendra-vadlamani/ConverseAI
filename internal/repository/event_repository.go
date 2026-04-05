@@ -13,6 +13,7 @@ type EventRepository interface {
 	StoreEvent(ctx context.Context, event model.ConversationEvent) error
 	GetEventsByConversationID(ctx context.Context, conversationID primitive.ObjectID) ([]model.ConversationEvent, error)
 	GetEventsByUserID(ctx context.Context, userID primitive.ObjectID) ([]model.ConversationEvent, error)
+	DeleteEventsByConversationID(ctx context.Context, conversationID primitive.ObjectID) error
 }
 
 type mongoEventRepository struct {
@@ -56,4 +57,9 @@ func (r *mongoEventRepository) GetEventsByUserID(ctx context.Context, userID pri
 		return nil, err
 	}
 	return events, nil
+}
+
+func (r *mongoEventRepository) DeleteEventsByConversationID(ctx context.Context, conversationID primitive.ObjectID) error {
+	_, err := r.collection.DeleteMany(ctx, bson.M{"conversation_id": conversationID})
+	return err
 }

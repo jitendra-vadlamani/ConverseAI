@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"ai-chat/internal/middleware"
 	"ai-chat/internal/orchestrator"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -40,15 +41,17 @@ func (h *OrchestratorHandler) Orchestrate(w http.ResponseWriter, r *http.Request
 		modelToUse = "gemma4:latest"
 	}
 
-	userID, _ := r.Context().Value("userID").(string)
+	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
 	uID, _ := primitive.ObjectIDFromHex(userID)
 	runID := primitive.NewObjectID() // Track this ad-hoc run as a "conversation"
 
-	result, err := h.orchestrator.Run(r.Context(), body.Query, modelToUse, nil, runID, uID)
+	result, _, _, err := h.orchestrator.Run(r.Context(), body.Query, modelToUse, nil, runID, uID)
 	
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(result)
+		return
 	}
 	json.NewEncoder(w).Encode(result)
 }

@@ -35,7 +35,7 @@ func Logger(next http.Handler) http.Handler {
 		
 		next.ServeHTTP(rw, r)
 		
-		userID, _ := r.Context().Value("userID").(string)
+		userID, _ := r.Context().Value(UserIDKey).(string)
 		if userID == "" {
 			userID = "anonymous"
 		}
