@@ -56,7 +56,7 @@ func main() {
 	userRepo := repository.NewUserRepository(db.DB)
 	llmRepo := repository.NewLLMRepository(db.DB)
 	systemLLMRepo := repository.NewSystemLLMRepository()
-	chatRepo := repository.NewChatRepository(db.DB)
+	chatRepo := repository.NewChatRepository(db.DB, cfg.DBEncryptionKey)
 	eventRepo := repository.NewEventRepository(db.DB)
 	eventBroker := events.NewEventBroker()
 

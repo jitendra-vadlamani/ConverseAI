@@ -25,6 +25,7 @@ type Config struct {
 	DefaultVisionModel     string
 	DefaultCodingModel     string
 	DefaultTranslationModel string
+	DBEncryptionKey         string
 }
 
 func LoadConfig() *Config {
@@ -51,10 +52,19 @@ func LoadConfig() *Config {
 		DefaultVisionModel:     getEnv("DEFAULT_VISION_MODEL", "qwen3-vl:8b"),
 		DefaultCodingModel:     getEnv("DEFAULT_CODING_MODEL", "qwen3-coder:latest"),
 		DefaultTranslationModel: getEnv("DEFAULT_TRANSLATION_MODEL", "translategemma:12b"),
+		DBEncryptionKey:         getEnv("DB_ENCRYPTION_KEY", "converseai_db_secret_key_32bytes"),
 	}
 
 	if cfg.JWTSecret == "converseai" {
 		log.Println("WARNING: Using default JWT secret. Set JWT_SECRET environment variable for production!")
+	}
+	
+	// Ensure DB Encryption Key is strictly 32 bytes (AES-256)
+	if len(cfg.DBEncryptionKey) != 32 {
+		log.Fatalf("ERROR: DB_ENCRYPTION_KEY must be exactly 32 bytes long for AES-256. Current length: %d", len(cfg.DBEncryptionKey))
+	}
+	if cfg.DBEncryptionKey == "converseai_db_secret_key_32bytes" {
+		log.Println("WARNING: Using default DB Encryption Key. Set DB_ENCRYPTION_KEY environment variable for production!")
 	}
 
 	return cfg

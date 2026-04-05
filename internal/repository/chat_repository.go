@@ -10,6 +10,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"ai-chat/internal/util"
 )
 
 type ChatRepository interface {
@@ -27,11 +29,13 @@ type ChatRepository interface {
 
 type MongoChatRepository struct {
 	collection *mongo.Collection
+	dbKey      string
 }
 
-func NewChatRepository(db *mongo.Database) ChatRepository {
+func NewChatRepository(db *mongo.Database, dbKey string) ChatRepository {
 	return &MongoChatRepository{
 		collection: db.Collection("conversations"),
+		dbKey:      dbKey,
 	}
 }
 
@@ -59,6 +63,16 @@ func (r *MongoChatRepository) GetConversationByID(ctx context.Context, id primit
 		}
 		return nil, fmt.Errorf("failed to get conversation: %w", err)
 	}
+
+	// Decrypt sensitive fields
+	if conv.Summary != "" {
+		conv.Summary, _ = util.DecryptString(conv.Summary, r.dbKey)
+	}
+	for i := range conv.Messages {
+		conv.Messages[i].Content, _ = util.DecryptString(conv.Messages[i].Content, r.dbKey)
+		conv.Messages[i].Reasoning, _ = util.DecryptString(conv.Messages[i].Reasoning, r.dbKey)
+	}
+
 	return &conv, nil
 }
 
@@ -74,11 +88,32 @@ func (r *MongoChatRepository) GetConversationsByUserID(ctx context.Context, user
 	if err := cursor.All(ctx, &conversations); err != nil {
 		return nil, fmt.Errorf("failed to decode conversations: %w", err)
 	}
+
+	// Decrypt sensitive fields
+	for _, conv := range conversations {
+		if conv.Summary != "" {
+			conv.Summary, _ = util.DecryptString(conv.Summary, r.dbKey)
+		}
+		for i := range conv.Messages {
+			conv.Messages[i].Content, _ = util.DecryptString(conv.Messages[i].Content, r.dbKey)
+			conv.Messages[i].Reasoning, _ = util.DecryptString(conv.Messages[i].Reasoning, r.dbKey)
+		}
+	}
+
 	return conversations, nil
 }
 
 func (r *MongoChatRepository) AddMessage(ctx context.Context, conversationID primitive.ObjectID, msg model.Message) error {
 	msg.CreatedAt = time.Now()
+	
+	// Encrypt sensitive fields before saving
+	if enc, err := util.EncryptString(msg.Content, r.dbKey); err == nil {
+		msg.Content = enc
+	}
+	if enc, err := util.EncryptString(msg.Reasoning, r.dbKey); err == nil {
+		msg.Reasoning = enc
+	}
+
 	update := bson.M{
 		"$push": bson.M{"messages": msg},
 		"$set":  bson.M{"updated_at": time.Now()},
@@ -103,6 +138,11 @@ func (r *MongoChatRepository) UpdateTotalTokens(ctx context.Context, id primitiv
 }
 
 func (r *MongoChatRepository) UpdateSummary(ctx context.Context, id primitive.ObjectID, summary string, tokens int) error {
+	// Encrypt summary before saving
+	if enc, err := util.EncryptString(summary, r.dbKey); err == nil {
+		summary = enc
+	}
+
 	update := bson.M{
 		"$set": bson.M{
 			"summary":             summary,
