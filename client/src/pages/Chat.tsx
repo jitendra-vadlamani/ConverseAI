@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Hash } from 'lucide-react';
+import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Hash, Paperclip, File as FileIcon, X } from 'lucide-react';
 import { getEncoding } from 'js-tiktoken';
 import { listLLMsApi, type LLMInfo } from '../api/llm';
 import {
@@ -35,6 +35,8 @@ export const Chat: React.FC = () => {
   const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
   const [llms, setLLMs] = useState<LLMInfo[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
@@ -107,6 +109,19 @@ export const Chat: React.FC = () => {
     }
   };
 
+  const triggerFileInput = () => {
+    fileInputRef.current?.click();
+  };
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      const files = Array.from(e.target.files);
+      setSelectedFiles((prev) => [...prev, ...files]);
+    }
+  };
+  const removeFile = (index: number) => {
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
@@ -136,6 +151,8 @@ export const Chat: React.FC = () => {
     setCurrentConversation({ ...conv, messages: updatedMessages });
     setInput('');
     setLoading(true);
+    const currentFiles = [...selectedFiles];
+    setSelectedFiles([]);
     setStreamingContent('');
     setStreamingThought('');
 
@@ -163,14 +180,13 @@ export const Chat: React.FC = () => {
           fetchInitialData();
         },
         (err) => {
-          if (err !== 'signal is aborted' && err !== 'The user aborted a request.') {
-            alert(err);
-          }
           setLoading(false);
           setStreamingContent('');
           setStreamingThought('');
           setAbortController(null);
+          console.error(err);
         },
+        currentFiles,
         controller.signal
       );
     } catch (error) {
@@ -239,28 +255,60 @@ export const Chat: React.FC = () => {
               <p>How can I help you today?</p>
             </div>
             <div className="chat-input-area">
-              <div className="input-container">
-                <textarea
-                  rows={1}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  placeholder="Message ConverseAI..."
-                  className="chat-textarea"
-                />
-                <button
-                  type="submit"
-                  className={`send-btn ${input.trim() || loading ? 'active' : ''}`}
-                  onClick={loading ? handleStop : handleSend}
-                  title={loading ? 'Stop Generating' : 'Send Message'}
-                >
-                  {loading ? <XCircle size={18} /> : <Send size={18} />}
-                </button>
+              <div className="input-container-wrapper">
+                <div className="input-container">
+                  <div className="input-actions-left">
+                    <input
+                      type="file"
+                      multiple
+                      ref={fileInputRef}
+                      onChange={handleFileChange}
+                      style={{ display: 'none' }}
+                    />
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={triggerFileInput}
+                      title="Upload Files"
+                    >
+                      <Paperclip size={18} />
+                    </button>
+                  </div>
+                  <textarea
+                    rows={Math.min(5, input.split('\n').length)}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
+                    placeholder="Message ConverseAI..."
+                    className="chat-textarea"
+                  />
+                  <button
+                    type="submit"
+                    className={`send-btn ${(input.trim() || selectedFiles.length > 0) && !loading ? 'active' : ''}`}
+                    onClick={loading ? handleStop : handleSend}
+                    title={loading ? 'Stop Generating' : 'Send Message'}
+                  >
+                    {loading ? <XCircle size={18} /> : <Send size={18} />}
+                  </button>
+                </div>
+                {selectedFiles.length > 0 && (
+                  <div className="file-preview-list">
+                    {selectedFiles.map((file, i) => (
+                      <div key={i} className="file-chip">
+                        <FileIcon size={12} />
+                        <span className="file-name">{file.name}</span>
+                        <button className="remove-file-btn" onClick={() => removeFile(i)}>
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -351,6 +399,23 @@ export const Chat: React.FC = () => {
                   );
                 })()}
                 <div className="input-container">
+                  <div className="input-actions-left">
+                    <input
+                      type="file"
+                      multiple
+                      ref={fileInputRef}
+                      onChange={handleFileChange}
+                      style={{ display: 'none' }}
+                    />
+                    <button
+                      type="button"
+                      className="action-btn"
+                      onClick={triggerFileInput}
+                      title="Upload Files"
+                    >
+                      <Paperclip size={18} />
+                    </button>
+                  </div>
                   <textarea
                     rows={1}
                     value={input}
@@ -364,21 +429,27 @@ export const Chat: React.FC = () => {
                     placeholder="Message ConverseAI..."
                     className="chat-textarea"
                   />
-                  <div className="input-actions-wrapper">
-                    {input.length > 0 && (
-                      <span className="live-token-counter">
-                        {tokenCount} tokens
-                      </span>
-                    )}
-                    <button
-                      className={`send-btn ${input.trim() && !loading ? 'active' : ''}`}
-                      onClick={handleSend}
-                      disabled={!input.trim() || loading}
-                    >
-                      {loading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
-                    </button>
-                  </div>
+                  <button
+                    className={`send-btn ${(input.trim() || selectedFiles.length > 0) && !loading ? 'active' : ''}`}
+                    onClick={loading ? handleStop : handleSend}
+                    disabled={(!input.trim() && selectedFiles.length === 0) && !loading}
+                  >
+                    {loading ? <XCircle size={18} /> : <Send size={18} />}
+                  </button>
                 </div>
+                {selectedFiles.length > 0 && (
+                  <div className="file-preview-list">
+                    {selectedFiles.map((file, i) => (
+                      <div key={i} className="file-chip">
+                        <FileIcon size={12} />
+                        <span className="file-name">{file.name}</span>
+                        <button className="remove-file-btn" onClick={() => removeFile(i)}>
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <p className="input-footer">ConverseAI can make mistakes. Check important info.</p>
             </footer>
@@ -419,12 +490,20 @@ export const Chat: React.FC = () => {
         .input-container-wrapper { max-width: 850px; margin: 0 auto; display: flex; flex-direction: column; gap: 0.375rem; }
         .chat-context-indicator { display: flex; align-items: center; gap: 0.375rem; font-size: 0.6875rem; color: #64748b; font-weight: 500; padding: 0 0.5rem; }
         .input-container { background: white; border: 1px solid #d1d5db; border-radius: 0.75rem; padding: 0.5rem; display: flex; align-items: flex-end; gap: 0.5rem; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
-        .chat-textarea { flex: 1; border: none; resize: none; padding: 0.25rem; font-size: 1rem; line-height: 1.5; outline: none; max-height: 200px; }
-        .input-actions-wrapper { display: flex; align-items: center; gap: 0.5rem; }
-        .live-token-counter { font-size: 0.7rem; color: #94a3b8; font-weight: 500; font-family: monospace; }
-        .send-btn { background: #e2e8f0; color: #94a3b8; border: none; padding: 0.5rem; border-radius: 0.375rem; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; }
-        .send-btn.active { background: #6366f1; color: white; }
-        .send-btn.active:hover { background: #4f46e5; transform: scale(1.05); }
+        .chat-textarea { flex: 1; min-height: 24px; max-height: 200px; padding: 0.75rem 0.5rem; padding-left: 1rem; border: none; outline: none; background: transparent; font-family: inherit; font-size: 0.9375rem; resize: none; color: #1e293b; line-height: 1.5; }
+        .input-actions-left { display: flex; align-items: center; padding: 0 0.5rem; }
+        .action-btn { background: none; border: none; color: #64748b; cursor: pointer; padding: 0.5rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+        .action-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .send-btn { background: none; border: none; color: #cbd5e1; cursor: pointer; padding: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0.5rem; margin-right: 0.25rem; }
+        .send-btn.active { color: #2563eb; background: #eff6ff; }
+        .send-btn.active:hover { transform: scale(1.1); transform-origin: center; }
+
+        .file-preview-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; padding: 0 1rem; padding-bottom: 0.5rem; }
+        .file-chip { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 0.5rem; padding: 0.25rem 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; color: #475569; position: relative; transition: all 0.2s; }
+        .file-chip:hover { background: #f1f5f9; border-color: #cbd5e1; }
+        .file-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .remove-file-btn { background: none; border: none; color: #94a3b8; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0.1rem; border-radius: 50%; }
+        .remove-file-btn:hover { color: #f43f5e; background: #fff1f2; }
         .message-token-count { font-size: 0.65rem; color: #94a3b8; font-weight: 500; }
         .message-meta-row { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem; }
         .summarized-tag { font-size: 0.6rem; color: #6366f1; background: #eef2ff; padding: 0.1rem 0.3rem; border-radius: 0.25rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.025em; }

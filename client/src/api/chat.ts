@@ -63,13 +63,29 @@ export const streamCompletionApi = async (
   onChunk: (chunk: string) => void,
   onEnd: () => void,
   onError: (err: string) => void,
+  files?: File[],
   signal?: AbortSignal
 ) => {
   try {
+    let body: any;
+    let headers: Record<string, string> = {};
+
+    if (files && files.length > 0) {
+      const formData = new FormData();
+      formData.append('conversation_id', conversationId);
+      formData.append('content', content);
+      files.forEach(f => formData.append('files', f));
+      body = formData;
+      // Fetch will automatically set multipart/form-data with the correct boundary
+    } else {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify({ conversation_id: conversationId, content });
+    }
+
     const response = await fetch('/api/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation_id: conversationId, content }),
+      headers,
+      body,
       signal
     });
 
