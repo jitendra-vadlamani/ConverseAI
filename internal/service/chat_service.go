@@ -32,6 +32,7 @@ type ChatService interface {
 	StreamCompletion(ctx context.Context, conversationID, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error
 	DeleteConversation(ctx context.Context, id string) error
 	GetEventStream(ctx context.Context, conversationID string) (<-chan model.ConversationEvent, error)
+	GetEvents(ctx context.Context, id string) ([]model.ConversationEvent, error)
 }
 
 type chatService struct {
@@ -92,6 +93,11 @@ func (s *chatService) CreateConversation(ctx context.Context, userID, modelConfi
 func (s *chatService) GetConversation(ctx context.Context, id string) (*model.Conversation, error) {
 	objID, _ := primitive.ObjectIDFromHex(id)
 	return s.repo.GetConversationByID(ctx, objID)
+}
+
+func (s *chatService) GetEvents(ctx context.Context, id string) ([]model.ConversationEvent, error) {
+	objID, _ := primitive.ObjectIDFromHex(id)
+	return s.eventRepo.GetEventsByConversationID(ctx, objID)
 }
 
 func (s *chatService) ListConversations(ctx context.Context, userID string) ([]*model.Conversation, error) {
@@ -165,10 +171,12 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	}
 
 	// 2. RAG Semantic Search
+	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchStarted, map[string]interface{}{"query": prompt})
 	ragContext, err := s.ragService.Search(tCtx, conv.UserID.Hex(), prompt, 5)
 	if err != nil {
 		log.Printf("[ChatService] Warning: RAG search failed: %v", err)
 	}
+	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchFinished, map[string]interface{}{"count": len(ragContext)})
 	if len(ragContext) > 0 {
 		extraContext += "\n### RELEVANT KNOWLEDGE FROM YOUR DOCUMENTS:\n" + strings.Join(ragContext, "\n---\n")
 	}
@@ -330,6 +338,7 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 				if ext == ".pdf" { label = "PDF DOCUMENT" }
 				extraContext.WriteString(fmt.Sprintf("\n--- %s: %s ---\n%s\n", label, id, textContent))
 			}
+			s.emitEvent(ctx, primitive.NewObjectID(), primitive.NewObjectID(), model.EventAttachmentResolved, map[string]interface{}{"id": id, "type": ext})
 		}
 	}
 
@@ -457,6 +466,7 @@ func (s *chatService) triggerSummarization(ctx context.Context, cfg *model.LLMCo
 	for _, m := range conv.Messages { historyText += fmt.Sprintf("%s: %s\n", m.Role, m.Content) }
 	prompt := fmt.Sprintf("Summarize the following conversation history for long-term memory. Be concise. Do NOT include any other text.\n\nCONVERSATION:\n%s", historyText)
 
+	s.emitEvent(ctx, conv.ID, conv.UserID, model.EventSummarizationStarted, map[string]interface{}{"history_len": len(historyText)})
 	resp, _ := s.ollamaClient.Generate(ctx, &ollama.GenerateRequest{
 		Model: cfg.ModelName, Prompt: prompt, Stream: false,
 	})
@@ -465,5 +475,6 @@ func (s *chatService) triggerSummarization(ctx context.Context, cfg *model.LLMCo
 		s.repo.UpdateSummary(ctx, conv.ID, resp.Response, summaryTokens)
 		s.repo.MarkMessagesAsSummarized(ctx, conv.ID)
 		s.repo.UpdateTotalTokens(ctx, conv.ID, -(conv.TotalTokens - summaryTokens))
+		s.emitEvent(ctx, conv.ID, conv.UserID, model.EventSummarizationFinished, map[string]interface{}{"summary_tokens": summaryTokens})
 	}
 }

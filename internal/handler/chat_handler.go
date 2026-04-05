@@ -224,6 +224,29 @@ func (h *ChatHandler) DeleteConversation(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *ChatHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
+		return
+	}
+
+	events, err := h.chatService.GetEvents(r.Context(), id)
+	if err != nil {
+		log.Printf("[ChatHandler] ERROR getting events for %s: %v", id, err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(events)
+}
+
 func (h *ChatHandler) StreamEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

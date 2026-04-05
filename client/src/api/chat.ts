@@ -23,6 +23,15 @@ export interface Conversation {
   updated_at: string;
 }
 
+export interface ConversationEvent {
+  id: string;
+  conversation_id: string;
+  user_id: string;
+  type: string;
+  payload: any;
+  timestamp: string;
+}
+
 export const listConversationsApi = async (): Promise<Conversation[]> => {
   const response = await fetch('/api/chat/conversations');
   if (!response.ok) throw new Error('Failed to list conversations');
@@ -54,6 +63,12 @@ export const deleteConversationApi = async (id: string): Promise<void> => {
     method: 'DELETE',
   });
   if (!response.ok) throw new Error('Failed to delete conversation');
+};
+
+export const getEventsApi = async (id: string): Promise<ConversationEvent[]> => {
+  const response = await fetch(`/api/chat/conversations/events?id=${id}`);
+  if (!response.ok) throw new Error('Failed to get events');
+  return response.json();
 };
 
 export const streamCompletionApi = async (

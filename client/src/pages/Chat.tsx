@@ -42,9 +42,10 @@ export const Chat: React.FC = () => {
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingThought, setStreamingThought] = useState('');
   const [abortController, setAbortController] = useState<AbortController | null>(null);
-  // const [tokenCount, setTokenCount] = useState(0);
+  const [activeTab, setActiveTab] = useState<'chat' | 'events'>('chat');
+  const [events, setEvents] = useState<any[]>([]);
+  const eventsEndRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  // const enc = useRef(getEncoding('cl100k_base'));
 
   // useEffect(() => {
   //   setTokenCount(enc.current.encode(input).length);
@@ -71,10 +72,14 @@ export const Chat: React.FC = () => {
 
   useEffect(() => {
     scrollToBottom();
-  }, [currentConversation?.messages, streamingContent, streamingThought]);
+  }, [currentConversation?.messages, streamingContent, streamingThought, events, activeTab]);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (activeTab === 'chat') {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    } else {
+      eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 
   const handleNewChat = () => {
@@ -86,8 +91,12 @@ export const Chat: React.FC = () => {
 
   const loadConversation = async (id: string) => {
     try {
-      const conv = await getConversationApi(id);
+      const [conv, historicalEvents] = await Promise.all([
+        getConversationApi(id),
+        fetch(`/api/chat/conversations/events?id=${id}`).then(r => r.json())
+      ]);
       setCurrentConversation(conv);
+      setEvents(historicalEvents || []);
       setSelectedModelId(conv.model_config_id || '');
     } catch (err) {
       alert('Failed to load conversation');
@@ -158,6 +167,15 @@ export const Chat: React.FC = () => {
     const controller = new AbortController();
     setAbortController(controller);
 
+    // Subscribe to Event Stream
+    const eventSource = new EventSource(`/api/chat/conversations/events/stream?id=${conv.id}`);
+    eventSource.onmessage = (e) => {
+      try {
+        const event = JSON.parse(e.data);
+        setEvents(prev => [...prev, event]);
+      } catch (err) {}
+    };
+
     try {
       await streamCompletionApi(
         conv.id,
@@ -169,6 +187,7 @@ export const Chat: React.FC = () => {
           setStreamingContent((prev) => prev + chunk);
         },
         async () => {
+          eventSource.close();
           if (conv?.id) {
             await loadConversation(conv.id);
           }
@@ -179,6 +198,7 @@ export const Chat: React.FC = () => {
           fetchInitialData();
         },
         (err) => {
+          eventSource.close();
           setLoading(false);
           setStreamingContent('');
           setStreamingThought('');
@@ -189,6 +209,7 @@ export const Chat: React.FC = () => {
         controller.signal
       );
     } catch (error) {
+      eventSource.close();
       console.error('Streaming error:', error);
     }
   };
@@ -346,69 +367,102 @@ export const Chat: React.FC = () => {
                   <div className={`status-dot ${llms.find(m => (m.config.id || m.config.name) === selectedModelId)?.status === 'Online' ? 'online' : 'offline'}`}></div>
                 )}
               </div>
+              <div className="chat-tabs">
+                <button 
+                  className={`tab-btn ${activeTab === 'chat' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('chat')}
+                >Chat</button>
+                <button 
+                  className={`tab-btn ${activeTab === 'events' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('events')}
+                >System Logs</button>
+              </div>
             </header>
 
-            <div className="messages-container">
-              {currentConversation.summary && (
-                <div className="summary-banner">
-                  <Brain size={16} />
-                  <span>Long-term memory active: {currentConversation.summary_token_count} tokens condensed into a summary.</span>
-                </div>
-              )}
-              {currentConversation.messages.map((msg, i) => (
-                <div key={i} className={`message-wrapper ${msg.role}`}>
-                  <div className="message-content">
-                    <div className="message-icon">
-                      {msg.role === 'user' ? <User size={20} /> : <Bot size={20} />}
-                    </div>
-                    <div className="message-text">
-                      <ThoughtBlock thought={msg.reasoning || ''} />
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {msg.content}
-                      </ReactMarkdown>
-                      <div className="message-meta-row">
-                        {msg.is_summarized && (
-                          <span className="summarized-tag">Summarized</span>
-                        )}
-                        {msg.token_count !== undefined && msg.token_count > 0 && (
-                          <div className="message-token-count">
-                            {msg.token_count} tokens
-                          </div>
-                        )}
+            {activeTab === 'chat' ? (
+              <div className="messages-container">
+                {currentConversation.summary && (
+                  <div className="summary-banner">
+                    <Brain size={16} />
+                    <span>Long-term memory active: {currentConversation.summary_token_count} tokens condensed into a summary.</span>
+                  </div>
+                )}
+                {currentConversation.messages.map((msg, i) => (
+                  <div key={i} className={`message-wrapper ${msg.role}`}>
+                    <div className="message-content">
+                      <div className="message-icon">
+                        {msg.role === 'user' ? <User size={20} /> : <Bot size={20} />}
+                      </div>
+                      <div className="message-text">
+                        <ThoughtBlock thought={msg.reasoning || ''} />
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {msg.content}
+                        </ReactMarkdown>
+                        <div className="message-meta-row">
+                          {msg.is_summarized && (
+                            <span className="summarized-tag">Summarized</span>
+                          )}
+                          {msg.token_count !== undefined && msg.token_count > 0 && (
+                            <div className="message-token-count">
+                              {msg.token_count} tokens
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
 
-              {(streamingContent || streamingThought) && (
-                <div className="message-wrapper assistant">
-                  <div className="message-content">
-                    <div className="message-icon"><Bot size={20} /></div>
-                    <div className="message-text">
-                      <ThoughtBlock thought={streamingThought} defaultOpen={true} />
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {streamingContent}
-                      </ReactMarkdown>
+                {(streamingContent || streamingThought) && (
+                  <div className="message-wrapper assistant">
+                    <div className="message-content">
+                      <div className="message-icon"><Bot size={20} /></div>
+                      <div className="message-text">
+                        <ThoughtBlock thought={streamingThought} defaultOpen={true} />
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {streamingContent}
+                        </ReactMarkdown>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {loading && !streamingContent && !streamingThought && (
-                <div className="loading-message">
-                  <Loader2 className="animate-spin" size={20} />
-                  <span>{selectedModelId ? 'Preparing response...' : 'Generating...'}</span>
+                {loading && !streamingContent && !streamingThought && (
+                  <div className="loading-message">
+                    <Loader2 className="animate-spin" size={20} />
+                    <span>{selectedModelId ? 'Preparing response...' : 'Generating...'}</span>
+                  </div>
+                )}
+                {loading && streamingThought && !streamingContent && (
+                  <div className="loading-message">
+                    <Loader2 className="animate-spin" size={20} />
+                    <span>Thinking...</span>
+                  </div>
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+            ) : (
+              <div className="events-container">
+                <div className="events-header">
+                  <span className="events-title">Internal Processing Events</span>
+                  <span className="events-count">{events.length} events logged</span>
                 </div>
-              )}
-              {loading && streamingThought && !streamingContent && (
-                <div className="loading-message">
-                  <Loader2 className="animate-spin" size={20} />
-                  <span>Thinking...</span>
+                <div className="events-list">
+                  {events.map((ev, i) => (
+                    <div key={i} className={`event-item ${ev.type}`}>
+                      <div className="event-meta">
+                        <span className="event-time">{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                        <span className="event-type">{ev.type.replace(/_/g, ' ')}</span>
+                      </div>
+                      <div className="event-payload">
+                        <pre>{JSON.stringify(ev.payload, null, 2)}</pre>
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={eventsEndRef} />
                 </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
+              </div>
+            )}
 
             <footer className="chat-input-area">
               <div className="input-container-wrapper">
@@ -544,6 +598,27 @@ export const Chat: React.FC = () => {
         .total-tokens-badge { display: none; }
         .input-footer { text-align: center; font-size: 0.6875rem; color: #94a3b8; margin-top: 0.5rem; }
 
+        .chat-tabs { display: flex; gap: 0.25rem; background: #f1f5f9; padding: 0.2rem; border-radius: 0.5rem; }
+        .tab-btn { padding: 0.3rem 0.75rem; border-radius: 0.375rem; border: none; background: transparent; font-size: 0.75rem; font-weight: 600; color: #64748b; cursor: pointer; transition: all 0.2s; }
+        .tab-btn.active { background: white; color: #0f172a; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
+
+        .events-container { flex: 1; overflow-y: auto; display: flex; flex-direction: column; background: #0f172a; }
+        .events-header { padding: 0.75rem 1.5rem; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; background: #1e293b; }
+        .events-title { font-size: 0.8125rem; font-weight: 600; color: #e2e8f0; }
+        .events-count { font-size: 0.6875rem; color: #94a3b8; }
+        .events-list { flex: 1; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
+        .event-item { background: #1e293b; border-radius: 0.5rem; padding: 0.75rem; border-left: 3px solid #3b82f6; }
+        .event-meta { display: flex; justify-content: space-between; margin-bottom: 0.5rem; }
+        .event-time { font-size: 0.65rem; color: #94a3b8; font-family: monospace; }
+        .event-type { font-size: 0.65rem; font-weight: 700; color: #3b82f6; text-transform: uppercase; letter-spacing: 0.05em; }
+        .event-payload { font-size: 0.75rem; color: #cbd5e1; background: #0f172a; padding: 0.5rem; border-radius: 0.25rem; overflow-x: auto; }
+        .event-payload pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+        
+        .event-item.rag_search_started { border-left-color: #8b5cf6; }
+        .event-item.rag_search_finished { border-left-color: #a78bfa; }
+        .event-item.planner_output { border-left-color: #10b981; }
+        .event-item.orchestration_started { border-left-color: #f59e0b; }
+        
         .welcome-container { flex: 1; display: flex; flex-direction: column; }
         .welcome-content { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
         .welcome-content h1 { font-size: 2rem; font-weight: 700; color: #1e293b; margin-bottom: 0.25rem; }

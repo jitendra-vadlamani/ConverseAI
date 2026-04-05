@@ -17,6 +17,11 @@ const (
 	EventModelLoadStarted         EventType = "model_load_started"
 	EventModelLoadFinished        EventType = "model_load_finished"
 	EventAssistantMessageGenerated EventType = "assistant_message_generated"
+	EventRAGSearchStarted         EventType = "rag_search_started"
+	EventRAGSearchFinished        EventType = "rag_search_finished"
+	EventAttachmentResolved       EventType = "attachment_resolved"
+	EventSummarizationStarted      EventType = "summarization_started"
+	EventSummarizationFinished     EventType = "summarization_finished"
 )
 
 type ConversationEvent struct {

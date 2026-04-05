@@ -99,6 +99,7 @@ func main() {
 	mux.HandleFunc("/api/chat/conversations/get", mw.JWTMiddleware(chatHandler.GetConversation))
 	mux.HandleFunc("/api/chat/conversations/create", mw.JWTMiddleware(chatHandler.CreateConversation))
 	mux.HandleFunc("/api/chat/conversations/delete", mw.JWTMiddleware(chatHandler.DeleteConversation))
+	mux.HandleFunc("/api/chat/conversations/events", mw.JWTMiddleware(chatHandler.GetEvents))
 	mux.HandleFunc("/api/chat/conversations/events/stream", mw.JWTMiddleware(chatHandler.StreamEvents))
 	mux.HandleFunc("/api/chat/completions", mw.JWTMiddleware(chatHandler.StreamCompletion))
 
