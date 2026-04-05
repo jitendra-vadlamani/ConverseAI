@@ -203,13 +203,15 @@ export const Chat: React.FC = () => {
           setStreamingContent('');
           setStreamingThought('');
           setAbortController(null);
+          alert(`Error: ${err}`);
           console.error(err);
         },
         currentFiles,
         controller.signal
       );
-    } catch (error) {
+    } catch (error: any) {
       eventSource.close();
+      alert(`Streaming error: ${error.message || error}`);
       console.error('Streaming error:', error);
     }
   };

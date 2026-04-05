@@ -27,8 +27,8 @@ const (
 type ConversationEvent struct {
 	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	ConversationID primitive.ObjectID `bson:"conversation_id" json:"conversation_id"`
-	UserID         primitive.ObjectID `bson:"user_id" json:"user_id"`
-	Type           EventType          `bson:"type" json:"type"`
-	Payload        interface{}        `bson:"payload" json:"payload"`
-	Timestamp      time.Time          `bson:"timestamp" json:"timestamp"`
+	UserID         primitive.ObjectID     `bson:"user_id" json:"user_id"`
+	Type           EventType              `bson:"type" json:"type"`
+	Payload        map[string]interface{} `bson:"payload" json:"payload"`
+	Timestamp      time.Time              `bson:"timestamp" json:"timestamp"`
 }

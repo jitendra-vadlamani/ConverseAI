@@ -42,7 +42,7 @@ func NewExecutor(client ollama.Client, modelManager manager.ModelManager, storag
 	}
 }
 
-func (s *sequentialExecutor) emitEvent(ctx context.Context, conversationID, userID primitive.ObjectID, eventType model.EventType, payload interface{}) {
+func (s *sequentialExecutor) emitEvent(ctx context.Context, conversationID, userID primitive.ObjectID, eventType model.EventType, payload map[string]interface{}) {
 	event := model.ConversationEvent{
 		ConversationID: conversationID,
 		UserID:         userID,

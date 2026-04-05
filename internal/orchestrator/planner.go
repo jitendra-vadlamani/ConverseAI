@@ -80,8 +80,19 @@ Example Result:
 
 		cleanJSON := sCleanJSON(resp.Response)
 		if err := json.Unmarshal([]byte(cleanJSON), &tasks); err != nil {
-			lastErr = fmt.Errorf("failed to parse JSON: %v", err)
-			continue
+			// Second attempt: parse as object and look for "tasks" key
+			var obj map[string]interface{}
+			if err2 := json.Unmarshal([]byte(cleanJSON), &obj); err2 == nil {
+				if t, ok := obj["tasks"].([]interface{}); ok {
+					b, _ := json.Marshal(t)
+					_ = json.Unmarshal(b, &tasks)
+				}
+			}
+			
+			if len(tasks) == 0 {
+				lastErr = fmt.Errorf("failed to parse JSON as tasks array: %v", err)
+				continue
+			}
 		}
 		
 		// If vision models are needed, ensure we pass attachments to the first task
@@ -91,7 +102,7 @@ Example Result:
 
 		if len(tasks) > 0 { return tasks, nil }
 	}
-	return nil, fmt.Errorf("failed after 2 retries: %v", lastErr)
+	return nil, fmt.Errorf("planning failed after 3 retries: %v", lastErr)
 }
 
 func sCleanJSON(raw string) string {

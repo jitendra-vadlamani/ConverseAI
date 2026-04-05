@@ -135,7 +135,7 @@ func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 	return s.repo.DeleteConversation(ctx, objID)
 }
 
-func (s *chatService) emitEvent(ctx context.Context, conversationID, userID primitive.ObjectID, eventType model.EventType, payload interface{}) {
+func (s *chatService) emitEvent(ctx context.Context, conversationID, userID primitive.ObjectID, eventType model.EventType, payload map[string]interface{}) {
 	event := model.ConversationEvent{
 		ConversationID: conversationID,
 		UserID:         userID,
@@ -212,9 +212,11 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	plan, err := s.planner.Plan(tCtx, finalPrompt, plannerModel, images)
 	
 	// Emit Planning Event
-	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, map[string]interface{}{
-		"plan": plan, "error": err,
-	})
+	eventPayload := map[string]interface{}{"plan": plan}
+	if err != nil {
+		eventPayload["error"] = err.Error()
+	}
+	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, eventPayload)
 
 	isOrchestration := false
 	if err == nil && len(plan) > 0 {
@@ -233,9 +235,11 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 
 		result, err := s.orchestrator.Run(tCtx, finalPrompt, llmConfig.ModelName, images, conv.ID, conv.UserID)
 		
-		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationFinished, map[string]interface{}{
-			"success": err == nil, "error": err,
-		})
+		eventPayload := map[string]interface{}{"success": err == nil}
+		if err != nil {
+			eventPayload["error"] = err.Error()
+		}
+		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationFinished, eventPayload)
 
 		if err != nil {
 			onDelta(fmt.Sprintf("\nError during orchestration: %v", err))
