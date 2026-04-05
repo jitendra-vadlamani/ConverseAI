@@ -50,15 +50,27 @@ docker run -d \
     --restart always \
     minio/minio server /data --console-address ":9001"
 
-# 3. Build Application
+# 3. Start Vector DB (ChromaDB)
+echo "🧬 Starting Vector DB (chromadb)..."
+docker stop converseai-vector 2>/dev/null || true
+docker rm converseai-vector 2>/dev/null || true
+docker run -d \
+    --name converseai-vector \
+    --network converseai-net \
+    -p 8000:8000 \
+    -v converseai_vector_data:/index_data \
+    --restart always \
+    chromadb/chroma:latest
+
+# 4. Build Application
 echo "🛠️ Building Application Image (converseai)..."
 docker build -t converseai .
 
-# 4. Stop existing container if running
+# 5. Stop existing container if running
 docker stop converseai 2>/dev/null || true
 docker rm converseai 2>/dev/null || true
 
-# 5. Start Application
+# 6. Start Application
 echo "🌐 Starting Application on port $HOST_PORT_APP..."
 docker run -d \
     --name converseai \
@@ -74,9 +86,18 @@ docker run -d \
     -e MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD \
     -e MINIO_BUCKET=$MINIO_BUCKET \
     -e MINIO_USE_SSL=false \
+    -e CHROMA_URL=http://converseai-vector:8000 \
+    -e EMBEDDING_MODEL=$EMBEDDING_MODEL \
+    -e DEFAULT_PLANNER_MODEL=$DEFAULT_PLANNER_MODEL \
+    -e DEFAULT_CHAT_MODEL=$DEFAULT_CHAT_MODEL \
+    -e DEFAULT_OCR_MODEL=$DEFAULT_OCR_MODEL \
+    -e DEFAULT_VISION_MODEL=$DEFAULT_VISION_MODEL \
+    -e DEFAULT_CODING_MODEL=$DEFAULT_CODING_MODEL \
+    -e DEFAULT_TRANSLATION_MODEL=$DEFAULT_TRANSLATION_MODEL \
     --add-host=host.docker.internal:host-gateway \
     --restart always \
     converseai
 
 echo "✅ Done! Application is running at http://localhost:$HOST_PORT_APP"
 echo "📂 MinIO Console is at http://localhost:9001 (User: $MINIO_ROOT_USER, Pass: $MINIO_ROOT_PASSWORD)"
+echo "🧬 ChromaDB is running at http://localhost:8000"

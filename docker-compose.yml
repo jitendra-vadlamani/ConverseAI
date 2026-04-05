@@ -54,7 +54,13 @@ services:
       - MINIO_BUCKET=${MINIO_BUCKET:-converseai}
       - MINIO_USE_SSL=false
       - CHROMA_URL=${CHROMA_URL:-http://chromadb:8000}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - DEFAULT_PLANNER_MODEL=${DEFAULT_PLANNER_MODEL}
+      - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL}
+      - DEFAULT_OCR_MODEL=${DEFAULT_OCR_MODEL}
+      - DEFAULT_VISION_MODEL=${DEFAULT_VISION_MODEL}
+      - DEFAULT_CODING_MODEL=${DEFAULT_CODING_MODEL}
+      - DEFAULT_TRANSLATION_MODEL=${DEFAULT_TRANSLATION_MODEL}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
