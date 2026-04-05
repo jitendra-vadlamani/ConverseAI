@@ -42,7 +42,7 @@ func IsImage(ext string) bool {
 // IsText returns true for common text-based file extensions.
 func IsText(ext string) bool {
 	switch strings.ToLower(ext) {
-	case ".txt", ".csv", ".json", ".md", ".go", ".py", ".js", ".ts":
+	case ".txt", ".csv", ".json", ".md", ".go", ".py", ".js", ".ts", ".svg", ".xml", ".html", ".css", ".yml", ".yaml", ".sh":
 		return true
 	}
 	return false
