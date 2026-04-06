@@ -13,9 +13,9 @@ import {
   updateConversationTitleApi,
   listConversationFilesApi,
   deleteConversationFileApi,
-  type Conversation,
   type Message,
-  type ConversationEvent
+  type ConversationEvent,
+  type Evidence
 } from '../api/chat';
 import { Link } from 'react-router-dom';
 import { FileCard } from '../components/FileCard';
@@ -52,6 +52,64 @@ const ThoughtBlock: React.FC<ThoughtBlockProps> = ({ thought, defaultOpen = fals
   );
 };
 
+const SourceBadge: React.FC<{ name: string; url?: string }> = ({ name, url }: { name: string; url?: string }) => {
+  const handleClick = (e: React.MouseEvent) => {
+    if (url) {
+      e.preventDefault();
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  return (
+    <span 
+      className={`source-badge ${url ? 'clickable' : ''}`} 
+      onClick={handleClick}
+      title={url ? `Open source: ${url}` : `Source: ${name}`}
+    >
+      <FileText size={10} />
+      <span>{name}</span>
+    </span>
+  );
+};
+
+const MarkdownContent: React.FC<{ content: string }> = ({ content }: { content: string }) => {
+  // Regex to match [Source: Name] or [1] etc.
+  // We'll roughly replace them with placeholders that ReactMarkdown components can then pick up
+  // Actually, a simpler way in v1 is to just parse the string before rendering
+  // but let's try to use the 'components' prop for a more robust approach.
+  
+  // Custom component for text to handle citation markers [Source: Name]
+  const renderers = {
+    text: ({ value }: { value: string }) => {
+      const parts = value.split(/(\[Source:\s*[^\]]+\]|\[\d+\])/g);
+      return (
+        <>
+          {parts.map((part, i) => {
+            const match = part.match(/\[Source:\s*([^\]]+)\]/);
+            const numMatch = part.match(/\[(\d+)\]/);
+            if (match) {
+              return <SourceBadge key={i} name={match[1]} url={part.includes('http') ? match[1] : undefined} />;
+            }
+            if (numMatch) {
+              return <SourceBadge key={i} name={numMatch[1]} />;
+            }
+            return part;
+          })}
+        </>
+      );
+    }
+  };
+
+  return (
+    <ReactMarkdown 
+      remarkPlugins={[remarkGfm]}
+      components={renderers as any}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+};
+
 interface EventItemProps {
   event: ConversationEvent;
 }
@@ -65,6 +123,16 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => {
       case 'rag_search_started':
       case 'rag_search_finished':
         return <Search size={14} />;
+      case 'search_started':
+      case 'search_finished':
+        return <Search size={14} className="text-blue-500" />;
+      case 'extraction_started':
+      case 'extraction_finished':
+        return <FileText size={14} className="text-orange-500" />;
+      case 'sufficiency_checked':
+        return <Brain size={14} className="text-green-500" />;
+      case 'grounded_generation_started':
+        return <Loader2 size={14} className="animate-spin text-purple-500" />;
       case 'planner_output':
       case 'orchestration_started':
         return <Brain size={14} />;
@@ -80,26 +148,67 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => {
     }
   };
 
-  return (
-    <div className={`event-item ${event.type}`}>
-      <div className="event-meta">
-        <div className="event-type-wrapper">
-          <span className="event-icon">{getIcon()}</span>
-          <span className="event-type">{event.type.replace(/_/g, ' ')}</span>
+  const renderSufficiencyResult = () => {
+    if (event.type !== 'sufficiency_checked' || !event.payload) return null;
+    const { covered, missing, score } = event.payload as any;
+    return (
+      <div className="sufficiency-view">
+        <div className="sufficiency-score">
+          Confidence: <span className="score-val">{(score * 100).toFixed(0)}%</span>
         </div>
+        <div className="sufficiency-grid">
+          <div className="aspect-col covered">
+            <header>Found</header>
+            <ul>{Array.isArray(covered) && covered.map((a: string, i: number) => <li key={i}>{a}</li>)}</ul>
+          </div>
+          <div className="aspect-col missing">
+            <header>Missing</header>
+            <ul>{Array.isArray(missing) && missing.map((a: string, i: number) => <li key={i}>{a}</li>)}</ul>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderSearchMetadata = () => {
+    if ((event.type !== 'search_finished' && event.type !== 'rag_search_finished') || !event.payload) return null;
+    const results = event.payload.results || [];
+    if (!Array.isArray(results) || results.length === 0) return null;
+
+    return (
+      <div className="search-metadata-view">
+        {results.map((res: any, i: number) => (
+          <div key={i} className={`search-result-item ${res.is_conflicting ? 'conflicting' : ''}`}>
+            <header>
+              <span className="source-label">{res.source}</span>
+              <span className="score-badge main">Score: {(res.final_score * 100).toFixed(0)}%</span>
+              {res.is_conflicting && <span className="conflict-tag">CONFLICT</span>}
+            </header>
+            {res.is_conflicting && <p className="conflict-reason">{res.conflict_reason}</p>}
+            <div className="metrics">
+              <span>Auth: {(res.authority_score * 100).toFixed(0)}%</span>
+              <span>Fresh: {(res.freshness_score * 100).toFixed(0)}%</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="event-item">
+      <div className="event-header" onClick={() => setIsRawOpen(!isRawOpen)}>
+        {getIcon()}
+        <span className="event-type">{message}</span>
         <span className="event-time">{new Date(event.timestamp).toLocaleTimeString()}</span>
       </div>
-      <div className="event-content">
-        <div className="event-message">{message}</div>
-        <button className="event-raw-toggle" onClick={() => setIsRawOpen(!isRawOpen)}>
-          {isRawOpen ? 'Hide details' : 'Show details'}
-        </button>
-        {isRawOpen && (
-          <div className="event-payload">
-            <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-          </div>
-        )}
-      </div>
+      {isRawOpen && (
+        <div className="event-details">
+          {renderSufficiencyResult()}
+          {renderSearchMetadata()}
+          <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+        </div>
+      )}
     </div>
   );
 };
@@ -562,9 +671,7 @@ export const Chat: React.FC = () => {
                           {msg.is_summarized && <span className="summarized-tag">Summarized</span>}
                         </div>
                         <ThoughtBlock thought={msg.reasoning || ''} />
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {msg.content}
-                        </ReactMarkdown>
+                        <MarkdownContent content={msg.content} />
                         {msg.attachments && msg.attachments.length > 0 && (
                           <div className="message-attachments">
                             {msg.attachments.map((att, idx) => (
@@ -583,9 +690,7 @@ export const Chat: React.FC = () => {
                       <div className="message-icon"><Bot size={20} /></div>
                       <div className="message-text">
                         <ThoughtBlock thought={streamingThought} defaultOpen={true} />
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {streamingContent}
-                        </ReactMarkdown>
+                        <MarkdownContent content={streamingContent} />
                       </div>
                     </div>
                   </div>
@@ -852,6 +957,102 @@ export const Chat: React.FC = () => {
         .sidebar-footer { padding: 0.75rem; border-top: 1px solid #e2e8f0; }
         .sidebar-settings-link { display: flex; align-items: center; gap: 0.625rem; color: #4b5563; text-decoration: none; font-size: 0.8125rem; font-weight: 500; padding: 0.5rem; border-radius: 0.5rem; transition: all 0.2s; }
         .sidebar-settings-link:hover { background: #f3f4f6; color: #111827; }
+
+        /* New Reasoning & Search Styles */
+        .source-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.25rem;
+          background: #f1f5f9;
+          color: #475569;
+          padding: 0.1rem 0.4rem;
+          border-radius: 0.25rem;
+          font-size: 0.75rem;
+          font-weight: 600;
+          margin: 0 0.2rem;
+          border: 1px solid #e2e8f0;
+          vertical-align: middle;
+          cursor: default;
+          transition: all 0.2s;
+        }
+        .source-badge.clickable {
+          cursor: pointer;
+          color: #2563eb;
+          border-color: #bfdbfe;
+          background: #eff6ff;
+        }
+        .source-badge.clickable:hover {
+          background: #dbeafe;
+          border-color: #3b82f6;
+        }
+
+        .sufficiency-view {
+          margin-top: 0.5rem;
+          background: #111827;
+          border-radius: 0.5rem;
+          padding: 0.75rem;
+          border: 1px solid #1e293b;
+        }
+        .sufficiency-score {
+          font-size: 0.75rem;
+          color: #94a3b8;
+          margin-bottom: 0.5rem;
+          font-weight: 600;
+        }
+        .score-val { color: #10b981; }
+        .sufficiency-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 0.75rem;
+        }
+        .aspect-col header {
+          font-size: 0.65rem;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          font-weight: 700;
+          margin-bottom: 0.4rem;
+        }
+        .aspect-col.covered header { color: #10b981; }
+        .aspect-col.missing header { color: #f59e0b; }
+        .aspect-col ul { list-style: none; padding: 0; margin: 0; }
+        .aspect-col li {
+          font-size: 0.75rem;
+          color: #cbd5e1;
+          padding: 0.25rem 0;
+          border-bottom: 1px solid #1e293b;
+        }
+        .aspect-col li:last-child { border-bottom: none; }
+        
+        /* Phase 2 Precision Styles */
+        .search-metadata-view {
+          margin-top: 0.5rem;
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+        .search-result-item {
+          background: #111827;
+          border: 1px solid #1e293b;
+          border-radius: 0.4rem;
+          padding: 0.5rem;
+        }
+        .search-result-item.conflicting { border-color: #ef4444; }
+        .search-result-item header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 0.25rem;
+        }
+        .source-label { font-size: 0.65rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; }
+        .score-badge.main { font-size: 0.65rem; color: #10b981; font-weight: 700; }
+        .conflict-tag { font-size: 0.6rem; color: white; background: #ef4444; padding: 0.05rem 0.25rem; border-radius: 0.2rem; font-weight: 800; }
+        .conflict-reason { font-size: 0.7rem; color: #fca5a5; font-style: italic; margin-bottom: 0.25rem; }
+        .metrics { display: flex; gap: 0.5rem; font-size: 0.6rem; color: #64748b; font-weight: 500; }
+        
+        .event-item.search_started { border-left-color: #3b82f6; }
+        .event-item.extraction_started { border-left-color: #f59e0b; }
+        .event-item.sufficiency_checked { border-left-color: #10b981; }
+        .event-item.grounded_generation_started { border-left-color: #8b5cf6; }
       `}</style>
     </div>
   );

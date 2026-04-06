@@ -128,7 +128,8 @@ func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 				if err := s.storageService.Delete(ctx, fileID); err != nil {
 					log.Printf("[ChatService] Warning: Failed to delete attachment %s: %v", fileID, err)
 				}
-				if err := s.ragService.DeleteFileKnowledge(ctx, conv.UserID.Hex(), fileID); err != nil {
+				collectionName := fmt.Sprintf("user-knowledge-%s", conv.UserID.Hex())
+				if err := s.ragService.DeleteFileKnowledge(ctx, collectionName, fileID); err != nil {
 					log.Printf("[ChatService] Warning: Failed to delete RAG knowledge for %s: %v", fileID, err)
 				}
 			}
@@ -164,7 +165,8 @@ func (s *chatService) DeleteConversationFile(ctx context.Context, userID, id, fi
 		if err := s.storageService.Delete(ctx, fileID); err != nil {
 			log.Printf("[ChatService] Warning: Failed to delete binary %s: %v", fileID, err)
 		}
-		if err := s.ragService.DeleteFileKnowledge(ctx, userID, fileID); err != nil {
+		collectionName := fmt.Sprintf("user-knowledge-%s", userID)
+		if err := s.ragService.DeleteFileKnowledge(ctx, collectionName, fileID); err != nil {
 			log.Printf("[ChatService] Warning: Failed to delete vector info for %s: %v", fileID, err)
 		}
 	}
@@ -210,19 +212,21 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, mode
 	}
 
 	// 2. RAG Semantic Search
-	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchStarted, map[string]interface{}{
-		"query": prompt, "message": "Searching knowledge base for relevant context...",
-	})
-	
-	ragContext, err := s.ragService.Search(tCtx, conv.UserID.Hex(), prompt, 10, attachmentIDs)
+	collectionName := fmt.Sprintf("user-knowledge-%s", conv.UserID.Hex())
+	ragEvidences, err := s.ragService.Search(tCtx, collectionName, prompt, 10, attachmentIDs)
 	if err != nil {
 		log.Printf("[ChatService] Warning: RAG search failed: %v", err)
 	}
 	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchFinished, map[string]interface{}{
-		"count": len(ragContext), "message": fmt.Sprintf("Search completed. Found %d relevant snippets using %s.", len(ragContext), modelName),
+		"count": len(ragEvidences), "message": fmt.Sprintf("Search completed. Found %d relevant snippets using %s.", len(ragEvidences), modelName),
 	})
-	if len(ragContext) > 0 {
-		extraContext += "\n### RELEVANT KNOWLEDGE FROM YOUR DOCUMENTS:\n" + strings.Join(ragContext, "\n---\n")
+	if len(ragEvidences) > 0 {
+		var ragText strings.Builder
+		ragText.WriteString("\n### RELEVANT KNOWLEDGE FROM YOUR DOCUMENTS:\n")
+		for _, ev := range ragEvidences {
+			ragText.WriteString(fmt.Sprintf("[Source: %s]\n%s\n---\n", ev.Source, ev.Content))
+		}
+		extraContext += ragText.String()
 	}
 
 	finalPrompt := prompt
@@ -423,7 +427,8 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 			if len(data) > 20*1024 {
 				fmt.Printf("[ChatService] File %s is large (%d bytes), triggering RAG ingestion\n", id, len(data))
 				go func(uID, fID, fName, content string) {
-					err := s.ragService.Ingest(context.Background(), uID, fID, fName, content)
+					collectionName := fmt.Sprintf("user-knowledge-%s", uID)
+					err := s.ragService.Ingest(context.Background(), collectionName, fID, fName, content)
 					if err != nil {
 						log.Printf("[ChatService] RAG Ingestion failed for %s: %v", fID, err)
 					}

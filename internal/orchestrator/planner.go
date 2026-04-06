@@ -15,6 +15,7 @@ import (
 
 type Planner interface {
 	Plan(ctx context.Context, query string, modelName string, images []string) ([]model.Task, int, int, error)
+	PlanNext(ctx context.Context, query string, context []model.PlanStep, modelName string, images []string) (*model.PlanStep, int, int, error)
 }
 
 type ollamaPlanner struct {
@@ -33,36 +34,114 @@ func NewPlanner(client ollama.Client, modelManager manager.ModelManager, systemR
 	}
 }
 
-func (p *ollamaPlanner) Plan(ctx context.Context, query string, modelName string, images []string) ([]model.Task, int, int, error) {
-	fmt.Printf("[Planner] Generating plan for query: %s using model: %s (Images: %d)\n", query, modelName, len(images))
-	
+func (p *ollamaPlanner) PlanNext(ctx context.Context, query string, history []model.PlanStep, modelName string, images []string) (*model.PlanStep, int, int, error) {
+	fmt.Printf("[Planner] Deciding NEXT step for query: %s (History: %d)\n", query, len(history))
+
 	if err := p.modelManager.PrepareModel(ctx, modelName); err != nil {
 		fmt.Printf("[Planner] Warning: PrepareModel failed: %v\n", err)
 	}
 
-	systemPrompt := fmt.Sprintf(`You are a Task Planner. Your job is to decompose user queries into a sequence of atomic tasks.
-Available Task Types: "summarize", "translate", "search", "analyze", "chat"
+	// Build context from history
+	contextStr := ""
+	if len(history) > 0 {
+		contextStr = "\n## Previous Tool Results\n"
+		for i, h := range history {
+			contextStr += fmt.Sprintf("[%d] Tool: %s, Result: %s\n", i+1, h.Tool, h.Output)
+		}
+	}
 
-Preferred Models for Tasks:
-- OCR: "%s"
-- Vision/Analysis: "%s"
-- Coding: "%s"
-- Translation: "%s"
-- General Chat: "%s"
+	systemPrompt := `You are a high-fidelity planning engine that decides the next action in a multi-step AI reasoning system.
 
-Rules:
-1. Return ONLY a JSON array. DO NOT wrap it in an object. No preamble or markdown.
-2. If the user mentions "this", "it", or "the file", prioritize using the context provided in the "ADDITIONAL CONTEXT" section.
-3. For simple conversation (greetings, off-topic), use [{"type": "chat", "model": "%s", "input": "USER_PROMPT"}].
-4. If images are provided, start with an "analyze" task.
-5. Use "{{PREVIOUS_OUTPUT}}" to pass results between tasks in a sequence.
+Your job is to:
+1. Understand the user query. 
+2. If the query is complex or multi-part, decompose it into sub-questions (Step 0).
+3. Decide whether to use a tool based on the current context.
+4. Select the best tool (web_search, retrieve_documents, summarize, ocr_extract).
+5. Before answering ("none"), perform a Structured Sufficiency Check.
 
-Format:
-[
-  {"type": "task_type", "model": "model_name", "input": "specific instruction"}
-]`, 
-	p.cfg.DefaultOCRModel, p.cfg.DefaultVisionModel, p.cfg.DefaultCodingModel, p.cfg.DefaultTranslationModel, p.cfg.DefaultChatModel,
-	p.cfg.DefaultChatModel)
+---
+
+## Available Tools
+
+1. web_search
+   Input: { "query": "string" }
+   Use when you need current or external information. If previous RAG results were low relevance, use this.
+
+2. retrieve_documents
+   Input: { "query": "string" }
+   Use to search local user-uploaded files.
+
+3. summarize
+   Input: { "text": "string" }
+
+4. ocr_extract
+   Input: { "file_id": "string" }
+
+5. none
+   Use ONLY when all aspects of the query are covered with high confidence.
+
+---
+
+## Decision Rules (Confidence & Robustness)
+
+* **Adaptive Thresholding**: If previous tool results show [Relevance: < 0.7], treat the context as insufficient and trigger a web_search or Wikipedia fallback.
+* **Step 0 Decomposition**: For "Compare X and Y" or "What is A and why is B...", generate sub-queries first.
+
+---
+
+## Structured Sufficiency Check (MANDATORY)
+
+Your JSON response must follow this format:
+
+{
+  "tool": "tool_name",
+  "input": { ... },
+  "reason": "short explanation",
+  "confidence": 0.0 to 1.0,
+  "evaluation": {
+    "covered_aspects": ["list of what we know"],
+    "missing_aspects": ["list of what we still need to find"],
+    "sufficiency_score": 0.0 to 1.0
+  }
+}
+
+If "missing_aspects" is NOT empty, DO NOT choose "none". Continue searching.
+`
+
+	combinedPrompt := fmt.Sprintf("%s\n\nUser Query: %s\n%s", systemPrompt, query, contextStr)
+
+	// Look up context window for this model
+	numCtx := 8192 // safe default
+	if meta := p.systemRepo.GetMetadata(modelName); meta != nil && meta.ContextWindow > 0 {
+		numCtx = meta.ContextWindow
+	}
+
+	resp, err := p.client.Generate(ctx, &ollama.GenerateRequest{
+		Model: modelName, Prompt: combinedPrompt, Stream: false, Format: "json",
+		Options: map[string]interface{}{"num_ctx": numCtx},
+	})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	cleanJSON := sCleanJSON(resp.Response)
+	var step model.PlanStep
+	if err := json.Unmarshal([]byte(cleanJSON), &step); err != nil {
+		return nil, resp.PromptEvalCount, resp.EvalCount, fmt.Errorf("failed to parse JSON as PlanStep: %v (Response: %s)", err, resp.Response)
+	}
+
+	return &step, resp.PromptEvalCount, resp.EvalCount, nil
+}
+
+func (p *ollamaPlanner) Plan(ctx context.Context, query string, modelName string, images []string) ([]model.Task, int, int, error) {
+	// Refactor to use the new Tool-Based approach but return a Tasks array for legacy compatibility
+	// However, the user said "completely replace", so we might just return a single Task that triggers the loop
+	// For now, I'll return a special 'tool-loop' task if other components expect Plan() to return tasks.
+	// Actually, I will update Orchestrator to NOT call Plan() anymore.
+	
+	// Temporarily keep Plan() signature but it won't be used by the new Orchestrator.
+	return nil, 0, 0, fmt.Errorf("Plan() is deprecated, use PlanNext() in a loop")
+}
 
 	var tasks []model.Task
 	var lastErr error

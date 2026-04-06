@@ -1,73 +1,35 @@
-# React + TypeScript + Vite
+# ConverseAI Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The ConverseAI frontend is a high-performance React application built with Vite and TypeScript. It features a modern "Glassmorphism" UI designed for deep transparency into AI reasoning.
 
-Currently, two official plugins are available:
+## 🚀 Key Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+### 1. Dual-View Chat
+- **Conversation History**: Standard chat bubble view for grounded assistant responses.
+- **System Logs**: Real-time analytical tracing of the **Reasoning Engine**.
 
-## React Compiler
+### 2. Reasoning Visualization
+- **Multi-Stage Tracking**: Visual iconography for Search, Extraction, and Evaluation stages.
+- **Sufficiency Grid**: Transparent displays comparing "Found" vs "Missing" query aspects.
+- **Precision Metrics**: Every search result is presented with **Authority**, **Freshness**, and **Final Relevance** scores.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### 3. Integrated File Management
+- **Files Tab**: Centralized access to all documents uploaded or indexed in the current conversation.
+- **Context Awareness**: Quick viewing of RAG-indexed status for individual files.
 
-## Expanding the ESLint configuration
+### 4. Interactive Citations
+- **Source Badges**: Grounded claims are linked to clickable source badges that open original URLs in new tabs.
+- **Conflict Warning**: Automated visual flagging for sources that contradict each other.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## 🛠 Tech Stack
+- **Framework**: React 18
+- **Build Tool**: Vite
+- **Styling**: Vanilla CSS (Modern Modules)
+- **Icons**: Lucide-React
+- **Markdown**: React-Markdown + Remark-GFM (for source-badge parsing)
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
-
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## 📁 Structure
+- `src/components/`: Reusable UI elements (Buttons, Inputs, Modals).
+- `src/pages/`: Main page views (Chat, Home).
+- `src/api/`: Frontend API client for Go backend.
+- `src/styles/`: Global and component-specific stylesheets.

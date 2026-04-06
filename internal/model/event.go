@@ -22,6 +22,13 @@ const (
 	EventAttachmentResolved       EventType = "attachment_resolved"
 	EventSummarizationStarted      EventType = "summarization_started"
 	EventSummarizationFinished     EventType = "summarization_finished"
+	EventToolDecision              EventType = "tool_decision"
+	EventSearchStarted             EventType = "search_started"
+	EventSearchFinished            EventType = "search_finished"
+	EventExtractionStarted         EventType = "extraction_started"
+	EventExtractionFinished        EventType = "extraction_finished"
+	EventSufficiencyChecked        EventType = "sufficiency_checked"
+	EventGroundedGenerationStarted EventType = "grounded_generation_started"
 )
 
 type ConversationEvent struct {

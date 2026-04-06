@@ -22,6 +22,16 @@ export interface Conversation {
   updated_at: string;
 }
 
+export interface Evidence {
+  content: string;
+  source: string;
+  url?: string;
+  relevance_score: number;
+  authority_score?: number;
+  freshness_score?: number;
+  final_score: number;
+}
+
 export interface ConversationEvent {
   id: string;
   conversation_id: string;

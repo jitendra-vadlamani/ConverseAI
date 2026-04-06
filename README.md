@@ -9,9 +9,14 @@ ConverseAI is a high-performance, multimodal AI chat application built with Go a
 *   **Documents**: Supports text-based files (`.txt`, `.md`, `.go`, etc.) and **PDFs**.
 *   **Hybrid Ingestion**: Small files are injected directly into the prompt context, while larger files are automatically indexed into the **Vector Database** for semantic retrieval.
 
-### 2. Intelligent RAG (Retrieval-Augmented Generation)
-*   **Semantic Memory**: Uses **ChromaDB** with **Nomic Embed Text v2 MoE** to index and retrieve relevant snippets from your documents.
-*   **Search-First Retrieval**: For every query, the system automatically checks the vector database for relevant context before generating a response with the LLM.
+### 2. High-Fidelity Agentic Search & Reasoning
+*   **Iterative Planning**: Automatically decomposes complex queries into searchable sub-tasks using the **Step 0 Decomposition** strategy.
+*   **Sufficiency Evaluation**: Evaluates retrieved evidence for "Found" vs "Missing" aspects before synthesizing a final answer.
+*   **Fact-Checking & Conflict Detection**: Semantically clusters evidence and uses the LLM to identify and report contradictions across different sources.
+*   **Multi-Factor Scoring**: Performance is ranked based on **Relevance (60%)**, **Domain Authority (20%)**, and **Content Freshness (20%)**.
+*   **Grounded Citations**: Every claim is strictly cited with traceable source badges and confidence scores.
+
+### 3. Intelligent RAG (Retrieval-Augmented Generation)
 
 ### 4. Intelligent Document Processing
 *   **Dual-Path Extraction**:

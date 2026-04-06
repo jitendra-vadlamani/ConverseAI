@@ -65,15 +65,17 @@ func main() {
 		Options: options.Index().SetExpireAfterSeconds(30 * 24 * 60 * 60),
 	})
 
-	// 2. Initialize Orchestrator
-	planner := orchestrator.NewPlanner(ollamaClient, modelManager, systemLLMRepo, cfg)
-	validator := orchestrator.NewValidator(systemLLMRepo)
-	executor := orchestrator.NewExecutor(ollamaClient, modelManager, storageService, eventRepo, eventBroker, systemLLMRepo)
-	orch := orchestrator.NewOrchestrator(planner, validator, executor)
-
-	// 3. Initialize Services
+	// 2. Initialize Services First (Needed by Orchestrator)
 	authService := service.NewAuthService(userRepo, cfg)
 	ragService := service.NewRagService(cfg, ollamaClient)
+	searchService := service.NewSearchService()
+
+	// 3. Initialize Orchestrator
+	planner := orchestrator.NewPlanner(ollamaClient, modelManager, systemLLMRepo, cfg)
+	validator := orchestrator.NewValidator(systemLLMRepo)
+	executor := orchestrator.NewExecutor(ollamaClient, modelManager, storageService, eventRepo, eventBroker, systemLLMRepo, ragService, searchService)
+	orch := orchestrator.NewOrchestrator(planner, validator, executor, eventRepo, eventBroker)
+
 	chatService := service.NewChatService(chatRepo, systemLLMRepo, ollamaClient, modelManager, orch, planner, storageService, eventRepo, eventBroker, ragService, cfg)
 
 	// 4. Initialize Handlers
