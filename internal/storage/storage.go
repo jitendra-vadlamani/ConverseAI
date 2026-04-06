@@ -8,6 +8,10 @@ import (
 	"log"
 	"net/url"
 	"path/filepath"
+	"crypto/md5"
+	"encoding/hex"
+	"strings"
+	"path"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -19,6 +23,7 @@ type StorageService interface {
 	Get(ctx context.Context, fileID string) ([]byte, error)
 	GetPresignedURL(ctx context.Context, fileID string) (string, error)
 	Delete(ctx context.Context, fileID string) error
+	ListUserFiles(ctx context.Context, userID string) ([]string, error)
 }
 
 type minioStorage struct {
@@ -56,21 +61,87 @@ func NewStorageService(endpoint, accessKey, secretKey, bucketName string, useSSL
 }
 
 func (s *minioStorage) Save(ctx context.Context, userID, filename string, data []byte) (string, error) {
-	// Separation of files per user: user-{userID}/filename
-	// We sanitize the userID part and add a timestamp to prevent collisions
+	// 1. Calculate MD5
+	hash := md5.Sum(data)
+	md5Str := hex.EncodeToString(hash[:])
+
+	userPrefix := fmt.Sprintf("user-%s/", userID)
+	
+	// 2. Check for duplicate content (exact same MD5)
+	objects := s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
+		Prefix: userPrefix,
+	})
+	
+	existingFiles := make(map[string]string) // name -> ETag
+	
+	for obj := range objects {
+		if obj.Err != nil {
+			continue
+		}
+		// MinIO ETag is "md5hash" (with quotes)
+		etag := strings.Trim(obj.ETag, "\"")
+		if etag == md5Str {
+			log.Printf("[Storage] Reuse existing file with same content: %s", obj.Key)
+			return obj.Key, nil
+		}
+		
+		// Collect existing filenames to handle name collisions/versioning
+		baseName := path.Base(obj.Key)
+		// Strip the timestamp prefix if present (e.g., "123456-filename.pdf")
+		parts := strings.SplitN(baseName, "-", 2)
+		if len(parts) == 2 {
+			existingFiles[parts[1]] = etag
+		} else {
+			existingFiles[baseName] = etag
+		}
+	}
+
+	// 3. Handle filename collision (intelligence: create a new version)
+	finalFilename := filename
+	if _, exists := existingFiles[filename]; exists {
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		counter := 1
+		for {
+			versioned := fmt.Sprintf("%s (%d)%s", base, counter, ext)
+			if _, exists := existingFiles[versioned]; !exists {
+				finalFilename = versioned
+				break
+			}
+			counter++
+		}
+	}
+
+	// 4. Save with timestamp prefix to keep unique paths
 	timestamp := time.Now().UnixNano()
-	fileID := fmt.Sprintf("user-%s/%d-%s", userID, timestamp, filename)
+	fileID := fmt.Sprintf("%s%d-%s", userPrefix, timestamp, finalFilename)
 	
 	reader := bytes.NewReader(data)
 	_, err := s.client.PutObject(ctx, s.bucketName, fileID, reader, int64(len(data)), minio.PutObjectOptions{
-		ContentType: getContentType(filename),
+		ContentType: getContentType(finalFilename),
 	})
 	if err != nil {
 		return "", err
 	}
 	
-	log.Printf("[Storage] Saved file for user %s: %s", userID, fileID)
+	log.Printf("[Storage] Saved file for user %s: %s (MD5: %s)", userID, fileID, md5Str)
 	return fileID, nil
+}
+
+func (s *minioStorage) ListUserFiles(ctx context.Context, userID string) ([]string, error) {
+	prefix := fmt.Sprintf("user-%s/", userID)
+	objects := s.client.ListObjects(ctx, s.bucketName, minio.ListObjectsOptions{
+		Prefix: prefix,
+	})
+	
+	var files []string
+	for obj := range objects {
+		if obj.Err != nil {
+			return nil, obj.Err
+		}
+		files = append(files, obj.Key)
+	}
+	return files, nil
 }
 
 func (s *minioStorage) Get(ctx context.Context, fileID string) ([]byte, error) {

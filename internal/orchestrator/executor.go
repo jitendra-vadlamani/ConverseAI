@@ -82,6 +82,7 @@ func (e *sequentialExecutor) Execute(ctx context.Context, tasks []model.Task, co
 		// Emit Task Started Event
 		e.emitEvent(ctx, convID, userID, model.EventTaskStarted, map[string]interface{}{
 			"task_index": i, "type": t.Type, "model": t.Model,
+			"message": fmt.Sprintf("Starting task %d: %s using model %s", i+1, t.Type, t.Model),
 		})
 
 		// VRAM Management: Ensure current task model is loaded
@@ -120,6 +121,7 @@ func (e *sequentialExecutor) Execute(ctx context.Context, tasks []model.Task, co
 			t.Error = err.Error()
 			e.emitEvent(ctx, convID, userID, model.EventTaskFinished, map[string]interface{}{
 				"task_index": i, "success": false, "error": err.Error(),
+				"message": fmt.Sprintf("Task %d (%s) failed: %s", i+1, t.Type, err.Error()),
 			})
 			return tasks, totalTokens, fmt.Errorf("task %d (%s) failed: %v", i+1, t.Type, err)
 		}
@@ -138,6 +140,7 @@ func (e *sequentialExecutor) Execute(ctx context.Context, tasks []model.Task, co
 		// Emit Task Finished (Success) Event
 		e.emitEvent(ctx, convID, userID, model.EventTaskFinished, map[string]interface{}{
 			"task_index": i, "success": true,
+			"message": fmt.Sprintf("Task %d (%s) completed successfully.", i+1, t.Type),
 		})
 	}
 

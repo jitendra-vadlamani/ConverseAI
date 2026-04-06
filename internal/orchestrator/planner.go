@@ -90,12 +90,23 @@ Format:
 			// Second attempt: parse as object and look for "tasks", "plan", "steps", etc.
 			var obj map[string]interface{}
 			if err2 := json.Unmarshal([]byte(cleanJSON), &obj); err2 == nil {
-				possibleKeys := []string{"tasks", "plan", "steps", "items"}
-				for _, k := range possibleKeys {
-					if t, ok := obj[k].([]interface{}); ok {
-						b, _ := json.Marshal(t)
-						_ = json.Unmarshal(b, &tasks)
-						if len(tasks) > 0 { break }
+				// Case A: The object IS the task (no wrapper)
+				if _, ok := obj["type"]; ok {
+					var singleTask model.Task
+					if err3 := json.Unmarshal([]byte(cleanJSON), &singleTask); err3 == nil {
+						tasks = []model.Task{singleTask}
+					}
+				}
+
+				// Case B: The object has a wrapper key ("tasks", "plan", etc.)
+				if len(tasks) == 0 {
+					possibleKeys := []string{"tasks", "plan", "steps", "items"}
+					for _, k := range possibleKeys {
+						if t, ok := obj[k].([]interface{}); ok {
+							b, _ := json.Marshal(t)
+							_ = json.Unmarshal(b, &tasks)
+							if len(tasks) > 0 { break }
+						}
 					}
 				}
 			}

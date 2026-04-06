@@ -24,18 +24,20 @@ import (
 )
 
 type ChatService interface {
-	CreateConversation(ctx context.Context, userID, modelConfigID, modelName, title string) (*model.Conversation, error)
+	CreateConversation(ctx context.Context, userID, title string) (*model.Conversation, error)
 	GetConversation(ctx context.Context, id string) (*model.Conversation, error)
 	ListConversations(ctx context.Context, userID string) ([]*model.Conversation, error)
-	StreamCompletion(ctx context.Context, conversationID, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error
-	DeleteConversation(ctx context.Context, id string) error
+	StreamCompletion(ctx context.Context, conversationID, modelName, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error
+	UpdateConversationTitle(ctx context.Context, id string, title string) error
 	GetEventStream(ctx context.Context, conversationID string) (<-chan model.ConversationEvent, error)
 	GetEvents(ctx context.Context, id string) ([]model.ConversationEvent, error)
+	ListModels(ctx context.Context) []model.LLMConfig
+	DeleteConversation(ctx context.Context, id string) error
+	DeleteConversationFile(ctx context.Context, userID, id, fileID string) error
 }
 
 type chatService struct {
 	repo           repository.ChatRepository
-	llmRepo        repository.LLMRepository
 	ollamaClient   ollama.Client
 	modelManager   manager.ModelManager
 	orchestrator   orchestrator.Orchestrator
@@ -48,10 +50,9 @@ type chatService struct {
 	cfg            *config.Config
 }
 
-func NewChatService(repo repository.ChatRepository, llmRepo repository.LLMRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
+func NewChatService(repo repository.ChatRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
 	return &chatService{
 		repo:           repo,
-		llmRepo:        llmRepo,
 		systemRepo:     systemRepo,
 		ollamaClient:   ollamaClient,
 		modelManager:   modelManager,
@@ -73,20 +74,11 @@ func (s *chatService) GetEventStream(ctx context.Context, conversationID string)
 	return s.eventBroker.Subscribe(cID), nil
 }
 
-func (s *chatService) CreateConversation(ctx context.Context, userID, modelConfigID, modelName, title string) (*model.Conversation, error) {
+func (s *chatService) CreateConversation(ctx context.Context, userID, title string) (*model.Conversation, error) {
 	uID, _ := primitive.ObjectIDFromHex(userID)
-	var mID primitive.ObjectID
-	if modelConfigID != "" {
-		mID, _ = primitive.ObjectIDFromHex(modelConfigID)
-	}
-	if modelName == "" {
-		modelName = s.cfg.DefaultChatModel
-	}
 	return s.repo.CreateConversation(ctx, &model.Conversation{
-		UserID:        uID,
-		ModelConfigID: mID,
-		ModelName:     modelName,
-		Title:         title,
+		UserID: uID,
+		Title:  title,
 	})
 }
 
@@ -105,6 +97,15 @@ func (s *chatService) ListConversations(ctx context.Context, userID string) ([]*
 	return s.repo.GetConversationsByUserID(ctx, uID)
 }
 
+func (s *chatService) ListModels(ctx context.Context) []model.LLMConfig {
+	return s.systemRepo.GetAllSystemModels()
+}
+
+func (s *chatService) UpdateConversationTitle(ctx context.Context, id string, title string) error {
+	objID, _ := primitive.ObjectIDFromHex(id)
+	return s.repo.UpdateConversationTitle(ctx, objID, title)
+}
+
 func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 	objID, _ := primitive.ObjectIDFromHex(id)
 	
@@ -117,16 +118,19 @@ func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 		return fmt.Errorf("conversation not found")
 	}
 
-	// 2. Clean up files in Storage
+	// 2. Clean up files in Storage (if no other conversation references them)
 	for _, msg := range conv.Messages {
 		for _, fileID := range msg.Attachments {
-			// Clean up binary storage
-			if err := s.storageService.Delete(ctx, fileID); err != nil {
-				log.Printf("[ChatService] Warning: Failed to delete attachment %s: %v", fileID, err)
-			}
-			// Clean up vector storage
-			if err := s.ragService.DeleteFileKnowledge(ctx, conv.UserID.Hex(), fileID); err != nil {
-				log.Printf("[ChatService] Warning: Failed to delete RAG knowledge for %s: %v", fileID, err)
+			// For each file in the conversation being deleted, we check if it's used elsewhere
+			count, _ := s.repo.CountFileReferences(ctx, conv.UserID, fileID)
+			// If count is 1, it's ONLY in this conversation (the one being deleted)
+			if count <= 1 {
+				if err := s.storageService.Delete(ctx, fileID); err != nil {
+					log.Printf("[ChatService] Warning: Failed to delete attachment %s: %v", fileID, err)
+				}
+				if err := s.ragService.DeleteFileKnowledge(ctx, conv.UserID.Hex(), fileID); err != nil {
+					log.Printf("[ChatService] Warning: Failed to delete RAG knowledge for %s: %v", fileID, err)
+				}
 			}
 		}
 	}
@@ -138,6 +142,34 @@ func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 
 	// 4. Delete from DB
 	return s.repo.DeleteConversation(ctx, objID)
+}
+
+func (s *chatService) DeleteConversationFile(ctx context.Context, userID, id, fileID string) error {
+	uID, _ := primitive.ObjectIDFromHex(userID)
+	convID, _ := primitive.ObjectIDFromHex(id)
+
+	// 1. Remove reference from conversation messages
+	if err := s.repo.RemoveFileFromConversation(ctx, convID, fileID); err != nil {
+		return err
+	}
+
+	// 2. Check if file is still used anywhere else for this user
+	count, err := s.repo.CountFileReferences(ctx, uID, fileID)
+	if err != nil {
+		return err
+	}
+
+	// 3. If no more references, purge from storage and RAG
+	if count == 0 {
+		if err := s.storageService.Delete(ctx, fileID); err != nil {
+			log.Printf("[ChatService] Warning: Failed to delete binary %s: %v", fileID, err)
+		}
+		if err := s.ragService.DeleteFileKnowledge(ctx, userID, fileID); err != nil {
+			log.Printf("[ChatService] Warning: Failed to delete vector info for %s: %v", fileID, err)
+		}
+	}
+
+	return nil
 }
 
 func (s *chatService) emitEvent(ctx context.Context, conversationID, userID primitive.ObjectID, eventType model.EventType, payload map[string]interface{}) {
@@ -154,7 +186,7 @@ func (s *chatService) emitEvent(ctx context.Context, conversationID, userID prim
 	s.eventBroker.Publish(event)
 }
 
-func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error {
+func (s *chatService) StreamCompletion(ctx context.Context, conversationID, modelName, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error {
 	tCtx, cancel := context.WithTimeout(ctx, 300*time.Second)
 	defer cancel()
 
@@ -164,9 +196,9 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		return err
 	}
 
-	llmConfig := s.resolveLLMConfig(tCtx, conv)
+	llmConfig := s.resolveLLMConfig(tCtx, modelName)
 	if llmConfig == nil {
-		return fmt.Errorf("no model configuration found")
+		return fmt.Errorf("no model configuration found for %s", modelName)
 	}
 
 	var userTokenCount, aiTokenCount int
@@ -178,13 +210,17 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	}
 
 	// 2. RAG Semantic Search
-	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchStarted, map[string]interface{}{"query": prompt})
+	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchStarted, map[string]interface{}{
+		"query": prompt, "message": "Searching knowledge base for relevant context...",
+	})
 	
 	ragContext, err := s.ragService.Search(tCtx, conv.UserID.Hex(), prompt, 10, attachmentIDs)
 	if err != nil {
 		log.Printf("[ChatService] Warning: RAG search failed: %v", err)
 	}
-	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchFinished, map[string]interface{}{"count": len(ragContext)})
+	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchFinished, map[string]interface{}{
+		"count": len(ragContext), "message": fmt.Sprintf("Search completed. Found %d relevant snippets using %s.", len(ragContext), modelName),
+	})
 	if len(ragContext) > 0 {
 		extraContext += "\n### RELEVANT KNOWLEDGE FROM YOUR DOCUMENTS:\n" + strings.Join(ragContext, "\n---\n")
 	}
@@ -196,7 +232,7 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 
 	// 2. Emit User Message Received Event
 	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventUserMessageReceived, map[string]interface{}{
-		"prompt": prompt, "attachments": attachmentIDs,
+		"prompt": prompt, "attachments": attachmentIDs, "message": "User message received.",
 	})
 
 	// 4. Handle Summarization BEFORE adding new user message
@@ -205,7 +241,7 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 
 	// 5. Add User Message to History (so it NEVER gets summarized on the current turn)
 	if err := s.repo.AddMessage(context.Background(), conv.ID, model.Message{
-		Role: model.RoleUser, Content: finalPrompt, Attachments: attachmentIDs, TokenCount: 0, CreatedAt: time.Now(),
+		Role: model.RoleUser, Content: finalPrompt, ModelName: modelName, Attachments: attachmentIDs, TokenCount: 0, CreatedAt: time.Now(),
 	}); err != nil {
 		return err
 	}
@@ -234,9 +270,12 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		aiTokenCount += outT
 
 		// Emit Planning Event
-		eventPayload := map[string]interface{}{"plan": plan}
+		eventPayload := map[string]interface{}{
+			"plan": plan, "model": plannerModel, "message": fmt.Sprintf("Query analyzed using %s: identified %d atomic tasks for processing.", plannerModel, len(plan)),
+		}
 		if err != nil {
 			eventPayload["error"] = err.Error()
+			eventPayload["message"] = "Planning failed: " + err.Error()
 		}
 		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, eventPayload)
 
@@ -253,7 +292,7 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	if isOrchestration {
 		onThought(fmt.Sprintf("[Orchestration] Executing %d tasks...\n", len(plan)))
 		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationStarted, map[string]interface{}{
-			"task_index": len(plan),
+			"task_index": len(plan), "primary_model": modelName, "message": fmt.Sprintf("Orchestration started: using %s as primary coordinator for %d tasks.", modelName, len(plan)),
 		})
 
 		var result *model.OrchestrationResult
@@ -264,9 +303,12 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 		aiTokenCount += outT
 		err = orchErr
 		
-		eventPayload := map[string]interface{}{"success": err == nil}
+		eventPayload := map[string]interface{}{
+			"success": err == nil, "message": "Orchestration workflow completed.",
+		}
 		if err != nil {
 			eventPayload["error"] = err.Error()
+			eventPayload["message"] = "Orchestration failed: " + err.Error()
 		}
 		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationFinished, eventPayload)
 
@@ -301,12 +343,12 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 
 	// 6. Save Assistant Message
 	s.repo.AddMessage(context.Background(), conv.ID, model.Message{
-		Role: model.RoleAssistant, Content: fullAIResponse, Reasoning: fullReasoning, TokenCount: aiTokenCount, CreatedAt: time.Now(),
+		Role: model.RoleAssistant, Content: fullAIResponse, Reasoning: fullReasoning, ModelName: llmConfig.ModelName, TokenCount: aiTokenCount, CreatedAt: time.Now(),
 	})
 	
 	// Emit Generation Event
 	s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventAssistantMessageGenerated, map[string]interface{}{
-		"token_count": aiTokenCount,
+		"token_count": aiTokenCount, "model": llmConfig.ModelName, "message": fmt.Sprintf("Assistant completed response using %s.", llmConfig.ModelName),
 	})
 
 	// Update User Message Token Count and Total Context
@@ -330,24 +372,18 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, prom
 	}
 }
 
-func (s *chatService) resolveLLMConfig(ctx context.Context, conv *model.Conversation) *model.LLMConfig {
-	if !conv.ModelConfigID.IsZero() {
-		cfg, _ := s.llmRepo.GetByID(ctx, conv.ModelConfigID)
-		if cfg != nil { return cfg }
-	}
-	modelName := conv.ModelName
+func (s *chatService) resolveLLMConfig(ctx context.Context, modelName string) *model.LLMConfig {
 	if modelName == "" {
 		modelName = s.cfg.DefaultChatModel
 	}
-
-	cfg := &model.LLMConfig{
-		Provider: model.ProviderOllama, ModelName: modelName, BaseURL: s.ollamaClient.GetBaseURL(),
-	}
 	
 	if meta := s.systemRepo.GetMetadata(modelName); meta != nil {
-		cfg.ContextWindow = meta.ContextWindow
+		return meta
 	}
-	return cfg
+
+	return &model.LLMConfig{
+		Provider: model.ProviderOllama, ModelName: modelName, BaseURL: s.ollamaClient.GetBaseURL(), ContextWindow: 4096,
+	}
 }
 
 func (s *chatService) handleSummarization(ctx context.Context, cfg *model.LLMConfig, conv *model.Conversation) {
@@ -403,7 +439,9 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 				if ext == ".pdf" { label = "PDF DOCUMENT" }
 				extraContext.WriteString(fmt.Sprintf("\n--- %s: %s ---\n%s\n", label, id, textContent))
 			}
-			s.emitEvent(ctx, primitive.NewObjectID(), primitive.NewObjectID(), model.EventAttachmentResolved, map[string]interface{}{"id": id, "type": ext})
+			s.emitEvent(ctx, convID, uID, model.EventAttachmentResolved, map[string]interface{}{
+				"id": id, "type": ext, "message": fmt.Sprintf("Attachment resolved: %s (%s)", id, ext),
+			})
 		}
 	}
 

@@ -54,7 +54,6 @@ func main() {
 	}
 
 	userRepo := repository.NewUserRepository(db.DB)
-	llmRepo := repository.NewLLMRepository(db.DB)
 	systemLLMRepo := repository.NewSystemLLMRepository()
 	chatRepo := repository.NewChatRepository(db.DB, cfg.DBEncryptionKey)
 	eventRepo := repository.NewEventRepository(db.DB)
@@ -74,13 +73,11 @@ func main() {
 
 	// 3. Initialize Services
 	authService := service.NewAuthService(userRepo, cfg)
-	llmService := service.NewLLMService(llmRepo, systemLLMRepo, ollamaClient)
 	ragService := service.NewRagService(cfg, ollamaClient)
-	chatService := service.NewChatService(chatRepo, llmRepo, systemLLMRepo, ollamaClient, modelManager, orch, planner, storageService, eventRepo, eventBroker, ragService, cfg)
+	chatService := service.NewChatService(chatRepo, systemLLMRepo, ollamaClient, modelManager, orch, planner, storageService, eventRepo, eventBroker, ragService, cfg)
 
 	// 4. Initialize Handlers
 	authHandler := handler.NewAuthHandler(authService)
-	llmHandler := handler.NewLLMHandler(llmService)
 	chatHandler := handler.NewChatHandler(chatService, storageService, eventBroker)
 	orchHandler := handler.NewOrchestratorHandler(orch)
 
@@ -95,14 +92,14 @@ func main() {
 	mux.HandleFunc("/api/auth/logout", authHandler.Logout)
 	mux.HandleFunc("/api/auth/password", mw.JWTMiddleware(authHandler.UpdatePassword))
 
-	mux.HandleFunc("/api/llms", mw.JWTMiddleware(llmHandler.List))
-	mux.HandleFunc("/api/llms/add", mw.JWTMiddleware(llmHandler.Add))
-	mux.HandleFunc("/api/llms/delete", mw.JWTMiddleware(llmHandler.Delete))
-
 	mux.HandleFunc("/api/chat/conversations", mw.JWTMiddleware(chatHandler.ListConversations))
+	mux.HandleFunc("/api/models", mw.JWTMiddleware(chatHandler.ListModels))
 	mux.HandleFunc("/api/chat/conversations/get", mw.JWTMiddleware(chatHandler.GetConversation))
 	mux.HandleFunc("/api/chat/conversations/create", mw.JWTMiddleware(chatHandler.CreateConversation))
 	mux.HandleFunc("/api/chat/conversations/delete", mw.JWTMiddleware(chatHandler.DeleteConversation))
+	mux.HandleFunc("/api/chat/conversations/title", mw.JWTMiddleware(chatHandler.UpdateConversationTitle))
+	mux.HandleFunc("/api/chat/conversations/files", mw.JWTMiddleware(chatHandler.DeleteConversationFile)) // DELETE method handled in handler
+	mux.HandleFunc("/api/chat/files/presign", mw.JWTMiddleware(chatHandler.GetFilePresignedURL))
 	mux.HandleFunc("/api/chat/conversations/events", mw.JWTMiddleware(chatHandler.GetEvents))
 	mux.HandleFunc("/api/chat/conversations/events/stream", mw.JWTMiddleware(chatHandler.StreamEvents))
 	mux.HandleFunc("/api/chat/completions", mw.JWTMiddleware(chatHandler.StreamCompletion))

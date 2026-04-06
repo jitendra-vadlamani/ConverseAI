@@ -1,22 +1,44 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Plus, Trash2, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Paperclip, File as FileIcon, X } from 'lucide-react';
+import { Send, Plus, Trash2, Edit3, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Paperclip, File as FileIcon, X, Search, FileText } from 'lucide-react';
 // import { getEncoding } from 'js-tiktoken';
-import { listLLMsApi, type LLMInfo } from '../api/llm';
 import {
   listConversationsApi,
   getConversationApi,
   createConversationApi,
   deleteConversationApi,
   streamCompletionApi,
+  listModelsApi,
+  updateConversationTitleApi,
+  listConversationFilesApi,
+  deleteConversationFileApi,
   type Conversation,
-  type Message
+  type Message,
+  type ConversationEvent
 } from '../api/chat';
 import { Link } from 'react-router-dom';
+import { FileCard } from '../components/FileCard';
 
-const ThoughtBlock: React.FC<{ thought: string; defaultOpen?: boolean }> = ({ thought, defaultOpen = false }) => {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
+type ThoughtBlockProps = {
+  thought: string;
+  defaultOpen?: boolean;
+};
+
+const ThoughtBlock: React.FC<ThoughtBlockProps> = ({ thought, defaultOpen = false }) => {
+  const [isOpen, setIsOpen] = useState(isStreamingThought(thought, defaultOpen));
+  
+  function isStreamingThought(t: string, def: boolean): boolean {
+    return t.length > 0 ? true : def;
+  }
+
+  // Effect to open when thought starts arriving
+  useEffect(() => {
+    if (thought.length > 0 && !isOpen) {
+      setIsOpen(true);
+    }
+  }, [thought]);
+
   if (!thought) return null;
   return (
     <div className="thought-block">
@@ -30,11 +52,63 @@ const ThoughtBlock: React.FC<{ thought: string; defaultOpen?: boolean }> = ({ th
   );
 };
 
+interface EventItemProps {
+  event: ConversationEvent;
+}
+
+const EventItem: React.FC<EventItemProps> = ({ event }) => {
+  const [isRawOpen, setIsRawOpen] = useState(false);
+  const message: string = event.payload?.message || event.type.replace(/_/g, ' ');
+  
+  const getIcon = (): React.ReactNode => {
+    switch (event.type) {
+      case 'rag_search_started':
+      case 'rag_search_finished':
+        return <Search size={14} />;
+      case 'planner_output':
+      case 'orchestration_started':
+        return <Brain size={14} />;
+      case 'task_started':
+      case 'task_finished':
+        return <Loader2 size={14} className={event.type === 'task_started' ? 'animate-spin' : ''} />;
+      case 'assistant_message_generated':
+        return <Bot size={14} />;
+      case 'attachment_resolved':
+        return <Paperclip size={14} />;
+      default:
+        return <MessageSquare size={14} />;
+    }
+  };
+
+  return (
+    <div className={`event-item ${event.type}`}>
+      <div className="event-meta">
+        <div className="event-type-wrapper">
+          <span className="event-icon">{getIcon()}</span>
+          <span className="event-type">{event.type.replace(/_/g, ' ')}</span>
+        </div>
+        <span className="event-time">{new Date(event.timestamp).toLocaleTimeString()}</span>
+      </div>
+      <div className="event-content">
+        <div className="event-message">{message}</div>
+        <button className="event-raw-toggle" onClick={() => setIsRawOpen(!isRawOpen)}>
+          {isRawOpen ? 'Hide details' : 'Show details'}
+        </button>
+        {isRawOpen && (
+          <div className="event-payload">
+            <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export const Chat: React.FC = () => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
-  const [llms, setLLMs] = useState<LLMInfo[]>([]);
-  const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const [models, setModels] = useState<any[]>([]);
+  const [selectedModelName, setSelectedModelName] = useState<string>('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [input, setInput] = useState('');
@@ -42,10 +116,13 @@ export const Chat: React.FC = () => {
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingThought, setStreamingThought] = useState('');
   const [abortController, setAbortController] = useState<AbortController | null>(null);
-  const [activeTab, setActiveTab] = useState<'chat' | 'events'>('chat');
-  const [events, setEvents] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'chat' | 'events' | 'files'>('chat');
+  const [events, setEvents] = useState<ConversationEvent[]>([]);
+  const [conversationFiles, setConversationFiles] = useState<string[]>([]);
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState<string>('');
 
   // useEffect(() => {
   //   setTokenCount(enc.current.encode(input).length);
@@ -57,14 +134,16 @@ export const Chat: React.FC = () => {
 
   const fetchInitialData = async () => {
     try {
-      const [convs, models] = await Promise.all([
+      const [convs, systemModels] = await Promise.all([
         listConversationsApi(),
-        listLLMsApi()
+        listModelsApi()
       ]);
       setConversations(convs || []);
-      setLLMs(models || []);
-      // Default to Auto-Routing ("")
-      setSelectedModelId("");
+      setModels(systemModels || []);
+      // Default to first model or Auto-Routing
+      if (systemModels && systemModels.length > 0) {
+        setSelectedModelName(systemModels[0].model_name);
+      }
     } catch (err) {
       console.error('Failed to fetch initial data:', err);
     }
@@ -74,7 +153,7 @@ export const Chat: React.FC = () => {
     scrollToBottom();
   }, [currentConversation?.messages, streamingContent, streamingThought, events, activeTab]);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = (): void => {
     if (activeTab === 'chat') {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     } else {
@@ -87,28 +166,71 @@ export const Chat: React.FC = () => {
     setStreamingContent('');
     setStreamingThought('');
     setInput('');
+    setEvents([]);
   };
 
-  const loadConversation = async (id: string) => {
+  const loadConversation = async (id: string): Promise<void> => {
     try {
-      const [conv, historicalEvents] = await Promise.all([
+      setEvents([]);
+      const [conv, historicalEvents, files] = await Promise.all([
         getConversationApi(id),
-        fetch(`/api/chat/conversations/events?id=${id}`).then(r => r.json())
+        fetch(`/api/chat/conversations/events?id=${id}`).then((r: Response) => r.json()),
+        listConversationFilesApi(id)
       ]);
       setCurrentConversation(conv);
       setEvents(historicalEvents || []);
-      setSelectedModelId(conv.model_config_id || '');
+      setConversationFiles(files || []);
+      // Derive current model from last message if available
+      if (conv.messages && conv.messages.length > 0) {
+        const lastMsg = conv.messages[conv.messages.length - 1];
+        if (lastMsg.model_name) {
+          setSelectedModelName(lastMsg.model_name);
+        }
+      }
     } catch (err) {
       alert('Failed to load conversation');
     }
   };
+  
+  const startEditing = (e: React.MouseEvent, conv: Conversation) => {
+    e.stopPropagation();
+    setEditingId(conv.id);
+    setEditingTitle(conv.title);
+  };
 
-  const handleDeleteConversation = async (e: React.MouseEvent, id: string) => {
+  const handleUpdateTitle = async (id: string) => {
+    if (!editingTitle.trim() || editingTitle === conversations.find(c => c.id === id)?.title) {
+      setEditingId(null);
+      return;
+    }
+    
+    try {
+      await updateConversationTitleApi(id, editingTitle.trim());
+      setConversations(conversations.map(c => c.id === id ? { ...c, title: editingTitle.trim() } : c));
+      if (currentConversation?.id === id) {
+        setCurrentConversation({ ...currentConversation, title: editingTitle.trim() });
+      }
+    } catch (err) {
+      alert('Failed to update title');
+    } finally {
+      setEditingId(null);
+    }
+  };
+
+  const handleUpdateTitleKeyDown = (e: React.KeyboardEvent, id: string) => {
+    if (e.key === 'Enter') {
+      handleUpdateTitle(id);
+    } else if (e.key === 'Escape') {
+      setEditingId(null);
+    }
+  };
+
+  const handleDeleteConversation = async (e: React.MouseEvent, id: string): Promise<void> => {
     e.stopPropagation();
     if (!window.confirm('Delete this conversation?')) return;
     try {
       await deleteConversationApi(id);
-      setConversations(conversations.filter(c => c.id !== id));
+      setConversations(conversations.filter((c: Conversation) => c.id !== id));
       if (currentConversation?.id === id) {
         handleNewChat();
       }
@@ -117,33 +239,32 @@ export const Chat: React.FC = () => {
     }
   };
 
-  const triggerFileInput = () => {
+  const triggerFileInput = (): void => {
     fileInputRef.current?.click();
   };
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
     if (e.target.files) {
       const files = Array.from(e.target.files);
-      setSelectedFiles((prev) => [...prev, ...files]);
+      setSelectedFiles((prev: File[]) => [...prev, ...files]);
     }
   };
-  const removeFile = (index: number) => {
-    setSelectedFiles((prev) => prev.filter((_, i) => i !== index));
+  const removeFile = (index: number): void => {
+    setSelectedFiles((prev: File[]) => prev.filter((_: File, i: number) => i !== index));
   };
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
 
-    const selectedModel = llms.find(m => (m.config.id || m.config.name) === selectedModelId);
-    if (selectedModelId !== "" && selectedModel && selectedModel.status !== 'Online') {
-      alert(`The selected model "${selectedModel.config.name}" is currently ${selectedModel.status}. Please select an Online model from the dropdown at the top, or use Auto-Routing.`);
+    const selectedModel = models.find(m => m.model_name === selectedModelName);
+    if (!selectedModel) {
+      alert(`Model ${selectedModelName} not found.`);
       return;
     }
 
     let conv = currentConversation;
     if (!conv) {
       try {
-        const modelName = selectedModel?.config.model_name;
-        conv = await createConversationApi(input.substring(0, 30), selectedModelId || undefined, modelName);
+        conv = await createConversationApi(input.substring(0, 30));
         setConversations([conv, ...conversations]);
         setCurrentConversation(conv);
       } catch (err) {
@@ -154,7 +275,7 @@ export const Chat: React.FC = () => {
 
     if (!conv) return;
 
-    const userMsg: Message = { role: 'user', content: input };
+    const userMsg: Message = { role: 'user', content: input, model_name: selectedModelName };
     const updatedMessages = [...conv.messages, userMsg];
     setCurrentConversation({ ...conv, messages: updatedMessages });
     setInput('');
@@ -169,27 +290,31 @@ export const Chat: React.FC = () => {
 
     // Subscribe to Event Stream
     const eventSource = new EventSource(`/api/chat/conversations/events/stream?id=${conv.id}`);
-    eventSource.onmessage = (e) => {
+    eventSource.onmessage = (e: MessageEvent) => {
       try {
-        const event = JSON.parse(e.data);
-        setEvents(prev => [...prev, event]);
+        const event: ConversationEvent = JSON.parse(e.data);
+        setEvents((prev: ConversationEvent[]) => [...prev, event]);
       } catch (err) {}
     };
 
     try {
       await streamCompletionApi(
         conv.id,
+        selectedModelName,
         input,
-        (thought) => {
-          setStreamingThought((prev) => prev + thought);
+        (thought: string) => {
+          setStreamingThought((prev: string) => prev + thought);
         },
-        (chunk) => {
-          setStreamingContent((prev) => prev + chunk);
+        (chunk: string) => {
+          setStreamingContent((prev: string) => prev + chunk);
         },
         async () => {
           eventSource.close();
           if (conv?.id) {
-            await loadConversation(conv.id);
+            await Promise.all([
+              loadConversation(conv.id),
+              listConversationFilesApi(conv.id).then(setConversationFiles)
+            ]);
           }
           setLoading(false);
           setStreamingContent('');
@@ -197,7 +322,7 @@ export const Chat: React.FC = () => {
           setAbortController(null);
           fetchInitialData();
         },
-        (err) => {
+        (err: string) => {
           eventSource.close();
           setLoading(false);
           setStreamingContent('');
@@ -216,13 +341,34 @@ export const Chat: React.FC = () => {
     }
   };
 
-  const handleStop = () => {
+  const handleStop = (): void => {
     if (abortController) {
       abortController.abort();
       setAbortController(null);
-      setLoading(false);
-      setStreamingContent('');
-      setStreamingThought('');
+    }
+    setLoading(false);
+    setStreamingContent('');
+    setStreamingThought('');
+  };
+
+  const handleDeleteFile = async (fileID: string) => {
+    if (!currentConversation) return;
+    if (!window.confirm(`Delete this file? It will be removed from this conversation. If not used elsewhere, it will be permanently deleted.`)) return;
+
+    try {
+      await deleteConversationFileApi(currentConversation.id, fileID);
+      // Update local state
+      setConversationFiles(prev => prev.filter(f => f !== fileID));
+      // Also update messages in currentConversation to remove the attachment visually
+      if (currentConversation.messages) {
+        const updatedMessages = currentConversation.messages.map(msg => ({
+          ...msg,
+          attachments: msg.attachments?.filter(a => a !== fileID)
+        }));
+        setCurrentConversation({ ...currentConversation, messages: updatedMessages });
+      }
+    } catch (err) {
+      alert('Failed to delete file');
     }
   };
 
@@ -237,13 +383,32 @@ export const Chat: React.FC = () => {
             <div
               key={conv.id}
               className={`conversation-item ${currentConversation?.id === conv.id ? 'active' : ''}`}
-              onClick={() => loadConversation(conv.id)}
+              onClick={() => editingId !== conv.id && loadConversation(conv.id)}
             >
               <MessageSquare size={16} />
-              <span className="conv-title">{conv.title}</span>
-              <button className="delete-conv-btn" onClick={(e) => handleDeleteConversation(e, conv.id)}>
-                <Trash2 size={14} />
-              </button>
+              {editingId === conv.id ? (
+                <input
+                  className="edit-title-input"
+                  value={editingTitle}
+                  onChange={(e) => setEditingTitle(e.target.value)}
+                  onKeyDown={(e) => handleUpdateTitleKeyDown(e, conv.id)}
+                  onBlur={() => handleUpdateTitle(conv.id)}
+                  autoFocus
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <>
+                  <span className="conv-title" title={conv.title}>{conv.title}</span>
+                  <div className="conv-actions">
+                    <button className="edit-conv-btn" onClick={(e) => startEditing(e, conv)} title="Rename">
+                      <Edit3 size={14} />
+                    </button>
+                    <button className="delete-conv-btn" onClick={(e) => handleDeleteConversation(e, conv.id)} title="Delete">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           ))}
         </div>
@@ -255,7 +420,7 @@ export const Chat: React.FC = () => {
       </aside>
 
       <main className="chat-main">
-        {(!llms || llms.length === 0) ? (
+        {(!models || models.length === 0) ? (
           <div className="empty-state-full">
             <Brain size={48} className="empty-icon" />
             <h3>No Models Configured</h3>
@@ -267,23 +432,19 @@ export const Chat: React.FC = () => {
         ) : !currentConversation ? (
           <div className="welcome-container">
             <header className="chat-header">
-              <div className={selectedModelId === "" ? "model-info-badge" : "model-selector-container"}>
-                {selectedModelId === "" && <Brain size={14} />}
+              <div className="model-selector-container">
+                <Brain size={14} />
                 <select 
-                  className="model-dropdown-simple"
-                  value={selectedModelId}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
-                >
-                  <option value="">Auto-Routing (Intelligent)</option>
-                  {llms.map((m) => (
-                    <option key={m.config.id || m.config.name} value={m.config.id || m.config.name}>
-                      {m.config.name} ({m.status})
-                    </option>
-                  ))}
-                </select>
-                {selectedModelId !== "" && (
-                  <div className={`status-dot ${llms.find(m => (m.config.id || m.config.name) === selectedModelId)?.status === 'Online' ? 'online' : 'offline'}`}></div>
-                )}
+                   className="model-dropdown-simple"
+                   value={selectedModelName}
+                   onChange={(e) => setSelectedModelName(e.target.value)}
+                 >
+                   {models.map((m) => (
+                     <option key={m.model_name} value={m.model_name}>
+                       {m.name || m.model_name}
+                     </option>
+                   ))}
+                 </select>
               </div>
             </header>
             <div className="welcome-content">
@@ -351,23 +512,19 @@ export const Chat: React.FC = () => {
         ) : (
           <>
             <header className="chat-header">
-              <div className={selectedModelId === "" ? "model-info-badge" : "model-selector-container"}>
-                {selectedModelId === "" && <Brain size={14} />}
+              <div className="model-selector-container">
+                <Brain size={14} />
                 <select 
                   className="model-dropdown-simple"
-                  value={selectedModelId}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
+                  value={selectedModelName}
+                  onChange={(e) => setSelectedModelName(e.target.value)}
                 >
-                  <option value="">Auto-Routing (Intelligent)</option>
-                  {llms.map((m) => (
-                    <option key={m.config.id || m.config.name} value={m.config.id || m.config.name}>
-                      {m.config.name} ({m.status})
+                  {models.map((m) => (
+                    <option key={m.model_name} value={m.model_name}>
+                      {m.name || m.model_name}
                     </option>
                   ))}
                 </select>
-                {selectedModelId !== "" && (
-                  <div className={`status-dot ${llms.find(m => (m.config.id || m.config.name) === selectedModelId)?.status === 'Online' ? 'online' : 'offline'}`}></div>
-                )}
               </div>
               <div className="chat-tabs">
                 <button 
@@ -378,6 +535,10 @@ export const Chat: React.FC = () => {
                   className={`tab-btn ${activeTab === 'events' ? 'active' : ''}`}
                   onClick={() => setActiveTab('events')}
                 >System Logs</button>
+                <button 
+                  className={`tab-btn ${activeTab === 'files' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('files')}
+                >Files</button>
               </div>
             </header>
 
@@ -396,10 +557,21 @@ export const Chat: React.FC = () => {
                         {msg.role === 'user' ? <User size={20} /> : <Bot size={20} />}
                       </div>
                       <div className="message-text">
+                        <div className="message-meta-row">
+                          {msg.model_name && <span className="message-model-tag">{msg.model_name}</span>}
+                          {msg.is_summarized && <span className="summarized-tag">Summarized</span>}
+                        </div>
                         <ThoughtBlock thought={msg.reasoning || ''} />
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
                           {msg.content}
                         </ReactMarkdown>
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="message-attachments">
+                            {msg.attachments.map((att, idx) => (
+                              <FileCard key={idx} fileID={att} />
+                            ))}
+                          </div>
+                        )}
                         </div>
                       </div>
                     </div>
@@ -422,7 +594,7 @@ export const Chat: React.FC = () => {
                 {loading && !streamingContent && !streamingThought && (
                   <div className="loading-message">
                     <Loader2 className="animate-spin" size={20} />
-                    <span>{selectedModelId ? 'Preparing response...' : 'Generating...'}</span>
+                    <span>Using {selectedModelName}...</span>
                   </div>
                 )}
                 {loading && streamingThought && !streamingContent && (
@@ -433,25 +605,53 @@ export const Chat: React.FC = () => {
                 )}
                 <div ref={messagesEndRef} />
               </div>
-            ) : (
-              <div className="events-container">
+            ) : activeTab === 'events' ? (
+              <div className="events-view-container">
                 <div className="events-header">
-                  <span className="events-title">Internal Processing Events</span>
+                  <div className="events-title">
+                    <MessageSquare size={18} />
+                    <span>Processing Events</span>
+                  </div>
                   <span className="events-count">{events.length} events logged</span>
                 </div>
                 <div className="events-list">
-                  {events.map((ev, i) => (
-                    <div key={i} className={`event-item ${ev.type}`}>
-                      <div className="event-meta">
-                        <span className="event-time">{new Date(ev.timestamp).toLocaleTimeString()}</span>
-                        <span className="event-type">{ev.type.replace(/_/g, ' ')}</span>
-                      </div>
-                      <div className="event-payload">
-                        <pre>{JSON.stringify(ev.payload, null, 2)}</pre>
-                      </div>
+                  {events.length > 0 ? (
+                    events.map((ev, i) => (
+                      <EventItem key={i} event={ev} />
+                    ))
+                  ) : (
+                    <div className="empty-events-state">
+                      <Loader2 size={32} className="animate-spin" />
+                      <p>Waiting for processing events...</p>
                     </div>
-                  ))}
+                  )}
                   <div ref={eventsEndRef} />
+                </div>
+              </div>
+            ) : (
+              <div className="files-view-container">
+                <div className="files-view-header">
+                  <div className="files-view-title">
+                    <FileText size={18} />
+                    <span>Files in this Conversation</span>
+                  </div>
+                  <span className="files-count">{conversationFiles.length} files</span>
+                </div>
+                <div className="files-grid">
+                  {conversationFiles.length > 0 ? (
+                    conversationFiles.map((fileID: string, idx: number) => (
+                      <FileCard 
+                        key={idx} 
+                        fileID={fileID} 
+                        onDelete={() => handleDeleteFile(fileID)} 
+                      />
+                    ))
+                  ) : (
+                    <div className="empty-files-state">
+                      <Paperclip size={32} />
+                      <p>No files uploaded in this conversation yet.</p>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -528,8 +728,12 @@ export const Chat: React.FC = () => {
         .conversation-item:hover { background: #f3f4f6; }
         .conversation-item.active { background: #f1f5f9; color: #111827; font-weight: 500; }
         .conv-title { font-size: 0.8125rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
-        .delete-conv-btn { opacity: 0; padding: 0.125rem; background: none; border: none; color: #9ca3af; cursor: pointer; transition: all 0.2s; }
-        .conversation-item:hover .delete-conv-btn { opacity: 1; }
+        .conv-actions { display: flex; gap: 0.25rem; opacity: 0; transition: opacity 0.2s; }
+        .conversation-item:hover .conv-actions { opacity: 1; }
+        .edit-conv-btn, .delete-conv-btn { padding: 0.25rem; background: none; border: none; color: #9ca3af; cursor: pointer; transition: all 0.2s; border-radius: 0.25rem; display: flex; align-items: center; justify-content: center; }
+        .edit-conv-btn:hover { color: #6366f1; background: #eef2ff; }
+        .delete-conv-btn:hover { color: #ef4444; background: #fef2f2; }
+        .edit-title-input { flex: 1; min-width: 0; background: white; border: 1px solid #6366f1; border-radius: 0.25rem; padding: 0.125rem 0.375rem; font-size: 0.8125rem; outline: none; box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.1); }
         
         .chat-main { flex: 1; display: flex; flex-direction: column; background: white; position: relative; }
         .model-info-badge { display: flex; align-items: center; gap: 0.4rem; background: #f0f9ff; padding: 0.3rem 0.75rem; border-radius: 2rem; border: 1px solid #bae6fd; font-size: 0.75rem; font-weight: 600; color: #0369a1; }
@@ -555,6 +759,7 @@ export const Chat: React.FC = () => {
         .input-actions-left { display: flex; align-items: center; padding: 0 0.5rem; }
         .action-btn { background: none; border: none; color: #64748b; cursor: pointer; padding: 0.5rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.2s; width: 34px; height: 34px; flex-shrink: 0; }
         .action-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .message-model-tag { font-size: 0.65rem; color: #94a3b8; background: #f8fafc; padding: 0.1rem 0.4rem; border-radius: 0.25rem; font-weight: 700; text-transform: uppercase; border: 1px solid #e2e8f0; }
         .send-btn { background: none; border: none; color: #cbd5e1; cursor: pointer; padding: 0.5rem; display: flex; align-items: center; justify-content: center; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0.5rem; margin-right: 0.25rem; flex-shrink: 0; }
         .send-btn.active { color: #2563eb; background: #eff6ff; }
         .send-btn.active:hover { transform: scale(1.1); transform-origin: center; }
@@ -574,6 +779,12 @@ export const Chat: React.FC = () => {
         .message-token-count { font-size: 0.65rem; color: #94a3b8; font-weight: 500; }
         .message-meta-row { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem; }
         .summarized-tag { font-size: 0.6rem; color: #6366f1; background: #eef2ff; padding: 0.1rem 0.3rem; border-radius: 0.25rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.025em; }
+        .message-attachments {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.5rem;
+          margin-top: 0.75rem;
+        }
         .summary-banner { max-width: 850px; margin: 0 auto 1rem; padding: 0.75rem 1rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 0.75rem; display: flex; align-items: center; gap: 0.75rem; font-size: 0.8125rem; color: #475569; }
         .total-tokens-badge { display: none; }
         .input-footer { text-align: center; font-size: 0.6875rem; color: #94a3b8; margin-top: 0.5rem; }
@@ -588,16 +799,42 @@ export const Chat: React.FC = () => {
         .events-count { font-size: 0.6875rem; color: #94a3b8; }
         .events-list { flex: 1; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
         .event-item { background: #1e293b; border-radius: 0.5rem; padding: 0.75rem; border-left: 3px solid #3b82f6; }
-        .event-meta { display: flex; justify-content: space-between; margin-bottom: 0.5rem; }
+        .event-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+        .event-type-wrapper { display: flex; align-items: center; gap: 0.4rem; }
+        .event-icon { color: #3b82f6; display: flex; align-items: center; }
         .event-time { font-size: 0.65rem; color: #94a3b8; font-family: monospace; }
         .event-type { font-size: 0.65rem; font-weight: 700; color: #3b82f6; text-transform: uppercase; letter-spacing: 0.05em; }
-        .event-payload { font-size: 0.75rem; color: #cbd5e1; background: #0f172a; padding: 0.5rem; border-radius: 0.25rem; overflow-x: auto; }
+        .event-content { display: flex; flex-direction: column; gap: 0.4rem; }
+        .event-message { font-size: 0.8125rem; color: #e2e8f0; font-weight: 500; }
+        .event-raw-toggle { align-self: flex-start; background: none; border: none; font-size: 0.65rem; color: #64748b; cursor: pointer; padding: 0; text-decoration: underline; margin-top: 0.2rem; }
+        .event-raw-toggle:hover { color: #94a3b8; }
+        .event-payload { font-size: 0.75rem; color: #cbd5e1; background: #0f172a; padding: 0.5rem; border-radius: 0.25rem; overflow-x: auto; margin-top: 0.5rem; }
         .event-payload pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
         
         .event-item.rag_search_started { border-left-color: #8b5cf6; }
+        .event-item.rag_search_started .event-icon, .event-item.rag_search_started .event-type { color: #8b5cf6; }
         .event-item.rag_search_finished { border-left-color: #a78bfa; }
+        .event-item.rag_search_finished .event-icon, .event-item.rag_search_finished .event-type { color: #a78bfa; }
         .event-item.planner_output { border-left-color: #10b981; }
+        .event-item.planner_output .event-icon, .event-item.planner_output .event-type { color: #10b981; }
         .event-item.orchestration_started { border-left-color: #f59e0b; }
+        .event-item.orchestration_started .event-icon, .event-item.orchestration_started .event-type { color: #f59e0b; }
+        .event-item.task_finished { border-left-color: #3b82f6; }
+
+        .files-view-container { flex: 1; overflow-y: auto; display: flex; flex-direction: column; background: #f8fafc; }
+        .files-view-header { padding: 1rem 1.5rem; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; background: white; }
+        .files-view-title { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9375rem; font-weight: 600; color: #1e293b; }
+        .files-count { font-size: 0.75rem; color: #64748b; font-weight: 500; }
+        .files-grid { padding: 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; align-content: flex-start; }
+        .empty-files-state { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4rem 2rem; color: #94a3b8; gap: 1rem; text-align: center; }
+        .empty-files-state p { font-size: 0.875rem; }
+
+        .events-view-container { flex: 1; overflow-y: auto; display: flex; flex-direction: column; background: white; }
+        .events-header { padding: 1rem 1.5rem; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
+        .events-title { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9375rem; font-weight: 600; color: #1e293b; }
+        .events-count { font-size: 0.75rem; color: #64748b; }
+        .events-list { flex: 1; padding: 1rem 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; }
+        .empty-events-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #94a3b8; gap: 1rem; }
         
         .welcome-container { flex: 1; display: flex; flex-direction: column; }
         .welcome-content { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }

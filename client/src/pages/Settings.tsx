@@ -1,23 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { updatePasswordApi } from '../api/auth';
-import { listLLMsApi, addLLMApi, deleteLLMApi } from '../api/llm';
-import type { LLMInfo, LLMConfig } from '../api/llm';
 import { useAuth } from '../hooks/useAuth';
 import { 
   Lock, 
   User as UserIcon, 
-  Bell, 
   Shield, 
-  Cpu, 
   Loader2, 
   CheckCircle2, 
-  AlertCircle, 
-  Plus, 
-  Trash2,
-  Database
+  AlertCircle
 } from 'lucide-react';
 
-type TabType = 'profile' | 'security' | 'models' | 'notifications';
+type TabType = 'profile' | 'security';
 
 export const Settings: React.FC = () => {
   const { user } = useAuth();
@@ -30,38 +23,6 @@ export const Settings: React.FC = () => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
-
-  // LLM Models State
-  const [models, setModels] = useState<LLMInfo[]>([]);
-  const [loadingModels, setLoadingModels] = useState(false);
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [newModel, setNewModel] = useState<Partial<LLMConfig>>({
-    provider: 'openai',
-    name: '',
-    model_name: '',
-    base_url: '',
-    api_key: '',
-    description: '',
-    context_window: 4096,
-  });
-
-  const fetchModels = async () => {
-    setLoadingModels(true);
-    try {
-      const data = await listLLMsApi();
-      setModels(data);
-    } catch (err) {
-      console.error('Failed to fetch models:', err);
-    } finally {
-      setLoadingModels(false);
-    }
-  };
-
-  useEffect(() => {
-    if (activeTab === 'models') {
-      fetchModels();
-    }
-  }, [activeTab]);
 
   const handlePasswordUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -82,31 +43,6 @@ export const Settings: React.FC = () => {
       setError(err.message || 'Failed to update password');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleAddModel = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    try {
-      await addLLMApi(newModel as LLMConfig);
-      setShowAddForm(false);
-      setNewModel({ provider: 'openai', name: '', model_name: '', base_url: '', api_key: '', description: '', context_window: 4096 });
-      fetchModels();
-    } catch (err: any) {
-      setError(err.message || 'Failed to add model');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleDeleteModel = async (id: string) => {
-    if (!window.confirm('Are you sure you want to remove this model configuration?')) return;
-    try {
-      await deleteLLMApi(id);
-      fetchModels();
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete model');
     }
   };
 
@@ -162,115 +98,6 @@ export const Settings: React.FC = () => {
             </form>
           </div>
         );
-      case 'models':
-        return (
-          <div>
-            <div className="tab-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <h2>AI Models</h2>
-                <p>Configure local Ollama models and external cloud providers.</p>
-              </div>
-              <button onClick={() => setShowAddForm(!showAddForm)} className="add-btn">
-                <Plus size={18} /> {showAddForm ? 'Cancel' : 'Add Model'}
-              </button>
-            </div>
-
-            {showAddForm ? (
-              <div className="model-form-card">
-                <form onSubmit={handleAddModel}>
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label>Provider</label>
-                      <select value={newModel.provider} onChange={(e) => setNewModel({...newModel, provider: e.target.value as any})} className="select-input">
-                        <option value="openai">OpenAI</option>
-                        <option value="claude">Claude</option>
-                        <option value="ollama">Ollama (Custom)</option>
-                        <option value="custom">Custom (OpenAI Compatible)</option>
-                      </select>
-                    </div>
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <label>Friendly Name</label>
-                      <input type="text" value={newModel.name} onChange={(e) => setNewModel({...newModel, name: e.target.value})} placeholder="e.g. My ChatGPT" required />
-                    </div>
-                  </div>
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label>Model Identifier</label>
-                      <input type="text" value={newModel.model_name} onChange={(e) => setNewModel({...newModel, model_name: e.target.value})} placeholder="e.g. gpt-4" required />
-                    </div>
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <label>Base URL (Optional)</label>
-                      <input type="text" value={newModel.base_url} onChange={(e) => setNewModel({...newModel, base_url: e.target.value})} placeholder="https://api.openai.com/v1" />
-                    </div>
-                  </div>
-                  <div className="form-row">
-                    <div className="form-group">
-                      <label>Context Window</label>
-                      <input type="number" value={newModel.context_window || 4096} onChange={(e) => setNewModel({...newModel, context_window: parseInt(e.target.value) || 0})} placeholder="e.g. 4096" />
-                    </div>
-                    <div className="form-group" style={{ flex: 2 }}>
-                      <label>Description (Optional)</label>
-                      <input type="text" value={newModel.description} onChange={(e) => setNewModel({...newModel, description: e.target.value})} placeholder="Briefly describe this model..." />
-                    </div>
-                  </div>
-                  <div className="form-group">
-                    <label>API Key</label>
-                    <div className="input-wrapper">
-                      <Shield className="input-icon" />
-                      <input type="password" value={newModel.api_key} onChange={(e) => setNewModel({...newModel, api_key: e.target.value})} placeholder="sk-..." required={newModel.provider !== 'ollama'} />
-                    </div>
-                  </div>
-                  <button type="submit" disabled={loading} className="auth-button">Add Model</button>
-                </form>
-              </div>
-            ) : (
-              <div style={{ minHeight: '300px' }}>
-                {loadingModels ? (
-                  <div className="loading-state"><Loader2 className="animate-spin" /> Fetching models...</div>
-                ) : models && models.length > 0 ? (
-                  <div className="models-grid">
-                    {models.map((llm) => (
-                      <div key={llm.config.id || llm.config.model_name} className="model-item">
-                        <div className="model-header">
-                          <span className={`status-badge ${llm.status.toLowerCase()}`}></span>
-                          <span className="model-name">{llm.config.name}</span>
-                          {llm.is_system && <span className="system-tag">System</span>}
-                        </div>
-                        <div className="model-details">
-                          <p><strong>Provider:</strong> {llm.config.provider}</p>
-                          <p><strong>Model:</strong> {llm.config.model_name}</p>
-                          <p className={`status-text ${llm.status.toLowerCase()}`}>Status: {llm.status}</p>
-                        </div>
-                        {!llm.is_system && (
-                          <button 
-                            className="delete-model-btn"
-                            onClick={() => handleDeleteModel(llm.config.id!)}
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        )}
-                        {llm.config.description && <p className="model-desc">{llm.config.description}</p>}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="empty-state">
-                    <Database size={48} className="empty-icon" />
-                    <h3>No Models Configured</h3>
-                    <p>Add a local Ollama model or a cloud provider to start chatting.</p>
-                    <button className="add-first-btn" onClick={() => setShowAddForm(true)}>
-                      <Plus size={18} /> Add Your First Model
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      case 'notifications':
-        return (
-          <div><div className="tab-header"><h2>Notifications</h2><p>Manage alerts.</p></div><p>Coming soon.</p></div>
-        );
     }
   };
 
@@ -279,8 +106,6 @@ export const Settings: React.FC = () => {
       <aside className="settings-sidebar">
         <button className={`sidebar-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => setActiveTab('profile')}><UserIcon size={20} /> Profile</button>
         <button className={`sidebar-item ${activeTab === 'security' ? 'active' : ''}`} onClick={() => setActiveTab('security')}><Shield size={20} /> Security</button>
-        <button className={`sidebar-item ${activeTab === 'models' ? 'active' : ''}`} onClick={() => setActiveTab('models')}><Cpu size={20} /> Models</button>
-        <button className={`sidebar-item ${activeTab === 'notifications' ? 'active' : ''}`} onClick={() => setActiveTab('notifications')}><Bell size={20} /> Notifications</button>
       </aside>
       <main className="tab-content">{renderTabContent()}</main>
       <style>{`

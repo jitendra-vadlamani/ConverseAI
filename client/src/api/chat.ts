@@ -4,6 +4,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   reasoning?: string;
+  model_name: string;
   token_count?: number;
   is_summarized?: boolean;
   created_at?: string;
@@ -13,8 +14,6 @@ export interface Conversation {
   id: string;
   user_id: string;
   title: string;
-  model_config_id?: string;
-  model_name?: string;
   messages: Message[];
   total_tokens?: number;
   summary?: string;
@@ -38,14 +37,18 @@ export const listConversationsApi = async (): Promise<Conversation[]> => {
   return response.json();
 };
 
-export const createConversationApi = async (title: string, modelConfigId?: string, modelName?: string): Promise<Conversation> => {
+export const listModelsApi = async (): Promise<any[]> => {
+  const response = await fetch('/api/models');
+  if (!response.ok) throw new Error('Failed to list models');
+  return response.json();
+};
+
+export const createConversationApi = async (title: string): Promise<Conversation> => {
   const response = await fetch('/api/chat/conversations/create', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      title,
-      model_config_id: modelConfigId,
-      model_name: modelName
+      title
     }),
   });
   if (!response.ok) throw new Error('Failed to create conversation');
@@ -71,8 +74,56 @@ export const getEventsApi = async (id: string): Promise<ConversationEvent[]> => 
   return response.json();
 };
 
+export const updateConversationTitleApi = async (id: string, title: string) => {
+  const response = await fetch('/api/chat/conversations/title', {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${localStorage.getItem('token')}`,
+    },
+    body: JSON.stringify({ id, title }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.message || 'Failed to update conversation title');
+  }
+};
+
+export const listConversationFilesApi = async (id: string) => {
+  const response = await fetch(`/api/chat/conversations/files?id=${id}`, {
+    headers: {
+      'Authorization': `Bearer ${localStorage.getItem('token')}`,
+    },
+  });
+  if (!response.ok) return [];
+  return response.json();
+};
+
+export const getPresignedUrlApi = async (fileID: string) => {
+  const response = await fetch(`/api/chat/files/presign?fileID=${encodeURIComponent(fileID)}`, {
+    headers: {
+      'Authorization': `Bearer ${localStorage.getItem('token')}`,
+    },
+  });
+  if (!response.ok) throw new Error('Failed to get download URL');
+  const data = await response.json();
+  return data.url;
+};
+
+export const deleteConversationFileApi = async (id: string, fileID: string) => {
+  const response = await fetch(`/api/chat/conversations/files?id=${id}&fileID=${encodeURIComponent(fileID)}`, {
+    method: 'DELETE',
+    headers: {
+      'Authorization': `Bearer ${localStorage.getItem('token')}`,
+    },
+  });
+  if (!response.ok) throw new Error('Failed to delete file');
+};
+
 export const streamCompletionApi = async (
   conversationId: string,
+  modelName: string,
   content: string,
   onThought: (thought: string) => void,
   onChunk: (chunk: string) => void,
@@ -88,13 +139,14 @@ export const streamCompletionApi = async (
     if (files && files.length > 0) {
       const formData = new FormData();
       formData.append('conversation_id', conversationId);
+      formData.append('model_name', modelName);
       formData.append('content', content);
       files.forEach(f => formData.append('files', f));
       body = formData;
       // Fetch will automatically set multipart/form-data with the correct boundary
     } else {
       headers['Content-Type'] = 'application/json';
-      body = JSON.stringify({ conversation_id: conversationId, content });
+      body = JSON.stringify({ conversation_id: conversationId, model_name: modelName, content });
     }
 
     const response = await fetch('/api/chat/completions', {

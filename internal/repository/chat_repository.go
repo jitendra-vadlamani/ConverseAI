@@ -24,7 +24,10 @@ type ChatRepository interface {
 	MarkMessagesAsSummarized(ctx context.Context, conversationID primitive.ObjectID) error
 	UpdateLastMessageTokenCount(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
 	SetTotalTokens(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
+	UpdateConversationTitle(ctx context.Context, id primitive.ObjectID, title string) error
 	DeleteConversation(ctx context.Context, id primitive.ObjectID) error
+	RemoveFileFromConversation(ctx context.Context, conversationID primitive.ObjectID, fileID string) error
+	CountFileReferences(ctx context.Context, userID primitive.ObjectID, fileID string) (int64, error)
 }
 
 type MongoChatRepository struct {
@@ -217,10 +220,50 @@ func (r *MongoChatRepository) SetTotalTokens(ctx context.Context, id primitive.O
 	return nil
 }
 
+func (r *MongoChatRepository) UpdateConversationTitle(ctx context.Context, id primitive.ObjectID, title string) error {
+	update := bson.M{
+		"$set": bson.M{
+			"title":      title,
+			"updated_at": time.Now(),
+		},
+	}
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
+		return fmt.Errorf("failed to update conversation title: %w", err)
+	}
+	return nil
+}
+
 func (r *MongoChatRepository) DeleteConversation(ctx context.Context, id primitive.ObjectID) error {
 	_, err := r.collection.DeleteOne(ctx, bson.M{"_id": id})
 	if err != nil {
 		return fmt.Errorf("failed to delete conversation: %w", err)
 	}
 	return nil
+}
+
+func (r *MongoChatRepository) RemoveFileFromConversation(ctx context.Context, id primitive.ObjectID, fileID string) error {
+	// Remove fileID from the "attachments" array in all messages of the conversation
+	update := bson.M{
+		"$pull": bson.M{"messages.$[].attachments": fileID},
+		"$set":  bson.M{"updated_at": time.Now()},
+	}
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
+		return fmt.Errorf("failed to remove file from conversation: %w", err)
+	}
+	return nil
+}
+
+func (r *MongoChatRepository) CountFileReferences(ctx context.Context, userID primitive.ObjectID, fileID string) (int64, error) {
+	// Count how many conversations for this user contain at least one message with this fileID in its attachments
+	filter := bson.M{
+		"user_id":              userID,
+		"messages.attachments": fileID,
+	}
+	count, err := r.collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count file references: %w", err)
+	}
+	return count, nil
 }

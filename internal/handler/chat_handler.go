@@ -98,9 +98,7 @@ func (h *ChatHandler) CreateConversation(w http.ResponseWriter, r *http.Request)
 	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
 
 	var req struct {
-		ModelConfigID string `json:"model_config_id"`
-		ModelName     string `json:"model_name"`
-		Title         string `json:"title"`
+		Title string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[ChatHandler] ERROR decoding create request: %v", err)
@@ -108,7 +106,7 @@ func (h *ChatHandler) CreateConversation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	conv, err := h.chatService.CreateConversation(r.Context(), userID, req.ModelConfigID, req.ModelName, req.Title)
+	conv, err := h.chatService.CreateConversation(r.Context(), userID, req.Title)
 	if err != nil {
 		log.Printf("[ChatHandler] ERROR creating conversation: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -134,6 +132,7 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var conversationID string
+	var modelName string
 	var content string
 	var attachmentIDs []string
 
@@ -144,6 +143,7 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		conversationID = r.FormValue("conversation_id")
+		modelName = r.FormValue("model_name")
 		content = r.FormValue("content")
 
 		// Handle files
@@ -167,6 +167,7 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 	} else {
 		var req struct {
 			ConversationID string `json:"conversation_id"`
+			ModelName      string `json:"model_name"`
 			Content        string `json:"content"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -175,6 +176,7 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		conversationID = req.ConversationID
+		modelName = req.ModelName
 		content = req.Content
 	}
 
@@ -195,7 +197,7 @@ func (h *ChatHandler) StreamCompletion(w http.ResponseWriter, r *http.Request) {
 	doneChan := make(chan error, 1)
 
 	go func() {
-		doneChan <- h.chatService.StreamCompletion(r.Context(), conversationID, content, attachmentIDs, func(thought string) {
+		doneChan <- h.chatService.StreamCompletion(r.Context(), conversationID, modelName, content, attachmentIDs, func(thought string) {
 			fmt.Fprintf(w, "event: thought\ndata: %s\n\n", thought)
 			flusher.Flush()
 		}, func(delta string) {
@@ -257,6 +259,169 @@ func (h *ChatHandler) DeleteConversation(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *ChatHandler) UpdateConversationTitle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.ID == "" || req.Title == "" {
+		http.Error(w, "Missing id or title", http.StatusBadRequest)
+		return
+	}
+
+	// IDOR protection: verify conversation belongs to the authenticated user
+	conv, err := h.chatService.GetConversation(r.Context(), req.ID)
+	if err != nil || conv == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	uID, _ := primitive.ObjectIDFromHex(userID)
+	if conv.UserID != uID {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	if err := h.chatService.UpdateConversationTitle(r.Context(), req.ID, req.Title); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *ChatHandler) ListConversationFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
+		return
+	}
+
+	conv, err := h.chatService.GetConversation(r.Context(), id)
+	if err != nil || conv == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	// IDOR protection
+	uID, _ := primitive.ObjectIDFromHex(userID)
+	if conv.UserID != uID {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	// Collect unique attachments
+	attachmentMap := make(map[string]bool)
+	var attachments []string
+	for _, msg := range conv.Messages {
+		for _, att := range msg.Attachments {
+			if !attachmentMap[att] {
+				attachmentMap[att] = true
+				attachments = append(attachments, att)
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(attachments)
+}
+
+func (h *ChatHandler) GetFilePresignedURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	fileID := r.URL.Query().Get("fileID")
+	if fileID == "" {
+		http.Error(w, "Missing fileID", http.StatusBadRequest)
+		return
+	}
+
+	// Security check: ensure file belongs to the user
+	// Paths are like user-{userID}/...
+	userPrefix := fmt.Sprintf("user-%s/", userID)
+	if !strings.HasPrefix(fileID, userPrefix) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	url, err := h.storageService.GetPresignedURL(r.Context(), fileID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"url": url})
+}
+
+func (h *ChatHandler) DeleteConversationFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	fileID := r.URL.Query().Get("fileID")
+	if id == "" || fileID == "" {
+		http.Error(w, "Missing conversation ID or fileID", http.StatusBadRequest)
+		return
+	}
+
+	// Double check ownership via file prefix
+	userPrefix := fmt.Sprintf("user-%s/", userID)
+	if !strings.HasPrefix(fileID, userPrefix) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := h.chatService.DeleteConversationFile(r.Context(), userID, id, fileID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *ChatHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -296,6 +461,17 @@ func (h *ChatHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(events)
+}
+
+func (h *ChatHandler) ListModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	models := h.chatService.ListModels(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(models)
 }
 
 func (h *ChatHandler) StreamEvents(w http.ResponseWriter, r *http.Request) {

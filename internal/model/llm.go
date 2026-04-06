@@ -17,12 +17,10 @@ const (
 
 type LLMConfig struct {
 	ID            *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	UserID        primitive.ObjectID  `bson:"user_id" json:"user_id"`
 	Provider      LLMProvider         `bson:"provider" json:"provider"`
 	Name          string              `bson:"name" json:"name"`
 	ModelName     string              `bson:"model_name" json:"model_name"`
 	BaseURL       string              `bson:"base_url,omitempty" json:"base_url,omitempty"`
-	APIKey        string              `bson:"api_key,omitempty" json:"api_key,omitempty"`
 	Description   string              `bson:"description,omitempty" json:"description,omitempty"`
 	ContextWindow int                 `bson:"context_window" json:"context_window"`
 	

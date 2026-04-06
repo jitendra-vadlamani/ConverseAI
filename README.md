@@ -28,7 +28,13 @@ ConverseAI is a high-performance, multimodal AI chat application built with Go a
 ### 6. Efficient Resource Management
 *   **Active LLM Control**: To optimize VRAM usage, only **one LLM stays active** at any point. The system automatically unloads the previous model before loading the next one.
 
-### 7. Durable & Scalable Storage
+### 7. Intelligent File Management
+*   **Zero-Waste Storage**: Automatically deduplicates files using **MD5 hashing**. Identical files across different conversations share a single physical storage entry.
+*   **Smart Versioning**: Intelligent filename collision handling—if you upload a new version of a file with the same name, ConverseAI automatically handles versioning to prevent data loss.
+*   **Contextual Visibility**: A dedicated **Files Tab** in every conversation provides a centralized view of all documents active in that context.
+*   **Reference-Aware Purging**: Deleting a file from a conversation only removes its reference. The physical file and its **Vector Index** are only purged when no other conversation references it, ensuring no "broken context" for other chats.
+
+### 8. Durable & Scalable Storage
 *   **MinIO**: Securely stores all raw images and documents.
 *   **MongoDB**: Stores conversation metadata, message history, and links to stored artifacts.
 
