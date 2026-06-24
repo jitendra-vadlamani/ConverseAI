@@ -24,7 +24,7 @@ import (
 )
 
 type ChatService interface {
-	CreateConversation(ctx context.Context, userID, title string) (*model.Conversation, error)
+	CreateConversation(ctx context.Context, userID, title string, projectID *string) (*model.Conversation, error)
 	GetConversation(ctx context.Context, id string) (*model.Conversation, error)
 	ListConversations(ctx context.Context, userID string) ([]*model.Conversation, error)
 	StreamCompletion(ctx context.Context, conversationID, modelName, prompt string, attachmentIDs []string, onThought func(string), onDelta func(string)) error
@@ -38,6 +38,7 @@ type ChatService interface {
 
 type chatService struct {
 	repo           repository.ChatRepository
+	projectRepo    repository.ProjectRepository
 	ollamaClient   ollama.Client
 	modelManager   manager.ModelManager
 	orchestrator   orchestrator.Orchestrator
@@ -50,9 +51,10 @@ type chatService struct {
 	cfg            *config.Config
 }
 
-func NewChatService(repo repository.ChatRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
+func NewChatService(repo repository.ChatRepository, projectRepo repository.ProjectRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
 	return &chatService{
 		repo:           repo,
+		projectRepo:    projectRepo,
 		systemRepo:     systemRepo,
 		ollamaClient:   ollamaClient,
 		modelManager:   modelManager,
@@ -74,11 +76,19 @@ func (s *chatService) GetEventStream(ctx context.Context, conversationID string)
 	return s.eventBroker.Subscribe(cID), nil
 }
 
-func (s *chatService) CreateConversation(ctx context.Context, userID, title string) (*model.Conversation, error) {
+func (s *chatService) CreateConversation(ctx context.Context, userID, title string, projectID *string) (*model.Conversation, error) {
 	uID, _ := primitive.ObjectIDFromHex(userID)
+	var projID *primitive.ObjectID
+	if projectID != nil && *projectID != "" {
+		pID, err := primitive.ObjectIDFromHex(*projectID)
+		if err == nil {
+			projID = &pID
+		}
+	}
 	return s.repo.CreateConversation(ctx, &model.Conversation{
-		UserID: uID,
-		Title:  title,
+		UserID:    uID,
+		Title:     title,
+		ProjectID: projID,
 	})
 }
 
@@ -206,7 +216,7 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, mode
 	var userTokenCount, aiTokenCount int
 
 	// 1. Resolve attachments from Storage
-	images, extraContext, err := s.resolveAttachments(tCtx, conv.UserID.Hex(), attachmentIDs)
+	images, extraContext, err := s.resolveAttachments(tCtx, conv.ID, conv.UserID, attachmentIDs)
 	if err != nil {
 		log.Printf("[ChatService] Warning: Failed to resolve some attachments: %v", err)
 	}
@@ -401,7 +411,7 @@ func (s *chatService) handleSummarization(ctx context.Context, cfg *model.LLMCon
 	}
 }
 
-func (s *chatService) resolveAttachments(ctx context.Context, userID string, attachmentIDs []string) ([]string, string, error) {
+func (s *chatService) resolveAttachments(ctx context.Context, convID, userID primitive.ObjectID, attachmentIDs []string) ([]string, string, error) {
 	var images []string
 	var extraContext strings.Builder
 
@@ -432,7 +442,7 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 					if err != nil {
 						log.Printf("[ChatService] RAG Ingestion failed for %s: %v", fID, err)
 					}
-				}(userID, id, id, textContent)
+				}(userID.Hex(), id, id, textContent)
 				
 				// Add a preview of the large file to the context
 				previewLen := 4000
@@ -444,7 +454,7 @@ func (s *chatService) resolveAttachments(ctx context.Context, userID string, att
 				if ext == ".pdf" { label = "PDF DOCUMENT" }
 				extraContext.WriteString(fmt.Sprintf("\n--- %s: %s ---\n%s\n", label, id, textContent))
 			}
-			s.emitEvent(ctx, convID, uID, model.EventAttachmentResolved, map[string]interface{}{
+			s.emitEvent(ctx, convID, userID, model.EventAttachmentResolved, map[string]interface{}{
 				"id": id, "type": ext, "message": fmt.Sprintf("Attachment resolved: %s (%s)", id, ext),
 			})
 		}
@@ -535,12 +545,52 @@ func (s *chatService) callLLMStream(ctx context.Context, cfg *model.LLMConfig, c
 
 func (s *chatService) prepareMessages(ctx context.Context, conv *model.Conversation) []ollama.ChatMessage {
 	messages := []ollama.ChatMessage{}
+
+	// Inject Project Context as System Instruction if conversation belongs to a Project
+	if conv.ProjectID != nil && s.projectRepo != nil {
+		proj, err := s.projectRepo.GetByID(ctx, *conv.ProjectID)
+		if err == nil && proj != nil {
+			var systemPrompt strings.Builder
+			systemPrompt.WriteString("You are the user's Chief of Staff and accountability partner.\n")
+			systemPrompt.WriteString(fmt.Sprintf("Your client's North Star Goal is: \"%s\" (Target: %s)\n\n", proj.Title, proj.TargetDate.Format("January 2006")))
+			
+			systemPrompt.WriteString("PROJECT MILESTONES & TASKS:\n")
+			for _, t := range proj.Tasks {
+				statusText := "Pending"
+				if t.Status == "completed" {
+					statusText = "Completed"
+				}
+				systemPrompt.WriteString(fmt.Sprintf("- %s: %s (Impact: %d/10, Urgency: %d/10, Effort: %d/10)\n", t.Title, statusText, t.Impact, t.Urgency, t.Effort))
+			}
+			systemPrompt.WriteString("\n")
+			
+			systemPrompt.WriteString("USER COMPETENCY LEVELS:\n")
+			for _, comp := range proj.Competencies {
+				systemPrompt.WriteString(fmt.Sprintf("- %s: %d%%\n", comp.Area, comp.ProgressPercentage))
+			}
+			systemPrompt.WriteString("\n")
+			
+			systemPrompt.WriteString("LONG-TERM MEMORY (CONSTRAINTS & LESSONS):\n")
+			for _, item := range proj.MemoryItems {
+				systemPrompt.WriteString(fmt.Sprintf("- [%s] %s\n", strings.ToUpper(item.Category), item.Content))
+			}
+			systemPrompt.WriteString("\n")
+			
+			systemPrompt.WriteString("INSTRUCTIONS: Guide the user to take high-leverage actions. Maintain a highly professional, encouraging, yet objective and results-focused tone. Refer to their constraints (e.g. time limitations, preparation needs) and lessons learned when recommending next steps. Focus conversations on actual progress rather than busywork.")
+			
+			messages = append(messages, ollama.ChatMessage{
+				Role:    "system",
+				Content: systemPrompt.String(),
+			})
+		}
+	}
+
 	if conv.Summary != "" {
 		messages = append(messages, ollama.ChatMessage{Role: "assistant", Content: "Context Summary: " + conv.Summary})
 	}
 	for _, m := range conv.Messages {
 		if !m.IsSummarized {
-			img, _, _ := s.resolveAttachments(ctx, conv.UserID.Hex(), m.Attachments)
+			img, _, _ := s.resolveAttachments(ctx, conv.ID, conv.UserID, m.Attachments)
 			messages = append(messages, ollama.ChatMessage{Role: string(m.Role), Content: m.Content, Images: img})
 		}
 	}

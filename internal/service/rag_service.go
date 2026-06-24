@@ -19,6 +19,8 @@ type RagService interface {
 	DeleteCollection(ctx context.Context, collectionName string) error
 	DeleteFileKnowledge(ctx context.Context, collectionName, fileID string) error
 	ClusterEvidence(ctx context.Context, evidences []model.Evidence) ([][]model.Evidence, error)
+	Ingest(ctx context.Context, collectionName, fileID, filename string, content string) error
+	Search(ctx context.Context, collectionName string, query string, topK int, fileIDs []string) ([]model.Evidence, error)
 }
 
 type ragService struct {

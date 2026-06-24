@@ -4,6 +4,8 @@ import { Login } from './pages/Login'
 import { Register } from './pages/Register'
 import { Settings } from './pages/Settings'
 import { Chat } from './pages/Chat'
+import { ProjectsList } from './pages/ProjectsList'
+import { Dashboard } from './pages/Dashboard'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { MainLayout } from './layouts/MainLayout'
 import './App.css'
@@ -21,6 +23,26 @@ function App() {
               <ProtectedRoute>
                 <MainLayout>
                   <Settings />
+                </MainLayout>
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/projects" 
+            element={
+              <ProtectedRoute>
+                <MainLayout>
+                  <ProjectsList />
+                </MainLayout>
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/projects/:id" 
+            element={
+              <ProtectedRoute>
+                <MainLayout hidePadding>
+                  <Dashboard />
                 </MainLayout>
               </ProtectedRoute>
             } 

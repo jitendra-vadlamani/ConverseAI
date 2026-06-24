@@ -3,11 +3,13 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"ai-chat/internal/model"
 	"ai-chat/internal/repository"
 	"ai-chat/internal/events"
+	"ai-chat/internal/ollama"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -80,9 +82,8 @@ func (o *systemOrchestrator) Run(ctx context.Context, query string, modelName st
 		}
 
 		// 2. Execute
-		output, inT, outT, err := o.executor.Execute(ctx, step.Tool, step.Reason, images)
-		totalInputTokens += inT
-		totalOutputTokens += outT
+		output, tokens, err := o.executor.ExecuteStep(ctx, step, convID, userID)
+		totalOutputTokens += tokens
 		if err != nil {
 			fmt.Printf("[Orchestrator] Execution failed: %v\n", err)
 			result.Error = fmt.Sprintf("Execution failed at step %d: %v", i+1, err)
@@ -168,22 +169,6 @@ func (o *systemOrchestrator) generateGroundedAnswer(ctx context.Context, query s
 
 Final Grounded Answer:`, query, evidence.String())
 
-	resp, err := o.planner.(*ollamaPlanner).client.Chat(ctx, &api.ChatRequest{
-		Model: modelName,
-		Messages: []api.Message{
-			{Role: "system", Content: "You are a professional assistant that provides grounded answers based on evidence."},
-			{Role: "user", Content: prompt},
-		},
-		Stream: false,
-	})
-	if err != nil {
-		return "", 0, 0, err
-	}
-
-	// Wait, ollama.Chat returns a stream if Stream: true, or a scanner if Stream: false?
-	// Actually, ollama.Chat in this codebase seems to return a response body if stream:true
-	// Let's use ollama.Generate for simplicity if available.
-	
 	genResp, err := o.planner.(*ollamaPlanner).client.Generate(ctx, &ollama.GenerateRequest{
 		Model: modelName, Prompt: prompt, Stream: false,
 	})

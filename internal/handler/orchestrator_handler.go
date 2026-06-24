@@ -19,6 +19,10 @@ func NewOrchestratorHandler(orch orchestrator.Orchestrator) *OrchestratorHandler
 	}
 }
 
+func (h *OrchestratorHandler) RegisterRoutes(mux *http.ServeMux, mw *middleware.Middleware) {
+	mux.HandleFunc("/api/orchestrate", mw.JWTMiddleware(h.Orchestrate))
+}
+
 func (h *OrchestratorHandler) Orchestrate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Query     string `json:"query"`

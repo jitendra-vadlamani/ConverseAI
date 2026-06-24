@@ -20,9 +20,17 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children, hidePadding })
   return (
     <div className="app-container">
       <header className="app-header">
-        <Link to="/" className="brand-link">
-          <h1 className="brand-title">ConverseAI</h1>
-        </Link>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
+          <Link to="/" className="brand-link" style={{ textDecoration: 'none' }}>
+            <h1 className="brand-title">ConverseAI</h1>
+          </Link>
+          {user && (
+            <nav style={{ display: 'flex', gap: '1.25rem', fontSize: '0.95rem', fontWeight: 500 }}>
+              <Link to="/" style={{ color: '#64748b', textDecoration: 'none', transition: 'color 0.2s' }} onMouseOver={(e) => e.currentTarget.style.color = '#4f46e5'} onMouseOut={(e) => e.currentTarget.style.color = '#64748b'}>General Chat</Link>
+              <Link to="/projects" style={{ color: '#64748b', textDecoration: 'none', transition: 'color 0.2s' }} onMouseOver={(e) => e.currentTarget.style.color = '#4f46e5'} onMouseOut={(e) => e.currentTarget.style.color = '#64748b'}>Chief of Staff</Link>
+            </nav>
+          )}
+        </div>
 
         {user && (
           <div className="header-actions">

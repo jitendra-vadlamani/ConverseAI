@@ -19,6 +19,14 @@ func NewAuthHandler(authService service.AuthService) *AuthHandler {
 	}
 }
 
+func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux, mw *middleware.Middleware) {
+	mux.HandleFunc("/api/auth/register", h.Register)
+	mux.HandleFunc("/api/auth/login", h.Login)
+	mux.HandleFunc("/api/auth/me", mw.JWTMiddleware(h.Me))
+	mux.HandleFunc("/api/auth/logout", h.Logout)
+	mux.HandleFunc("/api/auth/password", mw.JWTMiddleware(h.UpdatePassword))
+}
+
 type RegisterRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`

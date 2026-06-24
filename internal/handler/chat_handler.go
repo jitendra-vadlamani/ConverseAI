@@ -29,6 +29,20 @@ func NewChatHandler(chatService service.ChatService, storageService storage.Stor
 	}
 }
 
+func (h *ChatHandler) RegisterRoutes(mux *http.ServeMux, mw *middleware.Middleware) {
+	mux.HandleFunc("/api/chat/conversations", mw.JWTMiddleware(h.ListConversations))
+	mux.HandleFunc("/api/models", mw.JWTMiddleware(h.ListModels))
+	mux.HandleFunc("/api/chat/conversations/get", mw.JWTMiddleware(h.GetConversation))
+	mux.HandleFunc("/api/chat/conversations/create", mw.JWTMiddleware(h.CreateConversation))
+	mux.HandleFunc("/api/chat/conversations/delete", mw.JWTMiddleware(h.DeleteConversation))
+	mux.HandleFunc("/api/chat/conversations/title", mw.JWTMiddleware(h.UpdateConversationTitle))
+	mux.HandleFunc("/api/chat/conversations/files", mw.JWTMiddleware(h.DeleteConversationFile))
+	mux.HandleFunc("/api/chat/files/presign", mw.JWTMiddleware(h.GetFilePresignedURL))
+	mux.HandleFunc("/api/chat/conversations/events", mw.JWTMiddleware(h.GetEvents))
+	mux.HandleFunc("/api/chat/conversations/events/stream", mw.JWTMiddleware(h.StreamEvents))
+	mux.HandleFunc("/api/chat/completions", mw.JWTMiddleware(h.StreamCompletion))
+}
+
 func (h *ChatHandler) ListConversations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -98,7 +112,8 @@ func (h *ChatHandler) CreateConversation(w http.ResponseWriter, r *http.Request)
 	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
 
 	var req struct {
-		Title string `json:"title"`
+		Title     string  `json:"title"`
+		ProjectID *string `json:"project_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[ChatHandler] ERROR decoding create request: %v", err)
@@ -106,7 +121,7 @@ func (h *ChatHandler) CreateConversation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	conv, err := h.chatService.CreateConversation(r.Context(), userID, req.Title)
+	conv, err := h.chatService.CreateConversation(r.Context(), userID, req.Title, req.ProjectID)
 	if err != nil {
 		log.Printf("[ChatHandler] ERROR creating conversation: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -1,65 +1,126 @@
-# ConverseAI - Advanced Multimodal AI Chat
+# Chief of Staff AI — Personal Execution Operating System
 
-ConverseAI is a high-performance, multimodal AI chat application built with Go and React. It leverages the power of Ollama for local LLM execution, providing a secure and private environment for processing files, images, and complex reasoning tasks.
+Chief of Staff AI is a personal execution operating system that transforms long-term goals into daily actions, continuously tracks progress, identifies bottlenecks, reprioritizes work, and acts as an intelligent accountability partner.
 
-## 🚀 Features
+Unlike standard productivity tools that merely store tasks, Chief of Staff AI manages **outcomes**.
 
-### 1. Multimodal Input Processing
-*   **Images**: Upload images for visual analysis, OCR, or contextual questioning.
-*   **Documents**: Supports text-based files (`.txt`, `.md`, `.go`, etc.) and **PDFs**.
-*   **Hybrid Ingestion**: Small files are injected directly into the prompt context, while larger files are automatically indexed into the **Vector Database** for semantic retrieval.
+---
 
-### 2. High-Fidelity Agentic Search & Reasoning
-*   **Iterative Planning**: Automatically decomposes complex queries into searchable sub-tasks using the **Step 0 Decomposition** strategy.
-*   **Sufficiency Evaluation**: Evaluates retrieved evidence for "Found" vs "Missing" aspects before synthesizing a final answer.
-*   **Fact-Checking & Conflict Detection**: Semantically clusters evidence and uses the LLM to identify and report contradictions across different sources.
-*   **Multi-Factor Scoring**: Performance is ranked based on **Relevance (60%)**, **Domain Authority (20%)**, and **Content Freshness (20%)**.
-*   **Grounded Citations**: Every claim is strictly cited with traceable source badges and confidence scores.
+## 🎯 Vision
 
-### 3. Intelligent RAG (Retrieval-Augmented Generation)
+Most ambitious professionals do not fail because of a lack of knowledge. They fail because of:
+*   **Poor Prioritization**: Inability to distinguish high-impact actions from noise.
+*   **Competing Goals**: Attempting to execute too many objectives simultaneously.
+*   **Lack of Accountability**: No objective entity tracking execution rates.
+*   **Inconsistent Execution**: Difficulty in breaking down long-term goals into daily chunks.
+*   **Context Switching & Forgetting**: Losing track of long-term constraints and decisions.
 
-### 4. Intelligent Document Processing
-*   **Dual-Path Extraction**:
-    *   **Text-based PDFs**: Processed via high-speed direct extraction.
-    *   **Scanned Documents**: Automatically handled using **DeepSeek OCR 3B** for high-accuracy text reconstruction from images and scans.
+Chief of Staff AI answers a single question every day:
+> **"What is the highest leverage action I should take right now to achieve my goal?"**
 
-### 5. Specialized Model Routing
-*   **Intelligent Planner**: Automatically selects the best model for the job:
-    *   **OCR**: `deepseek-ocr:3b` for high-accuracy text extraction from images.
-    *   **Vision**: `qwen3-vl:8b` for visual analysis and description.
-    *   **Coding**: `qwen3-coder:latest` for technical and programming queries.
-    *   **Translation**: `translategemma:12b` for multilingual support.
+---
 
-### 6. Efficient Resource Management
-*   **Active LLM Control**: To optimize VRAM usage, only **one LLM stays active** at any point. The system automatically unloads the previous model before loading the next one.
+## ⛓️ Product Architecture Flow
 
-### 7. Intelligent File Management
-*   **Zero-Waste Storage**: Automatically deduplicates files using **MD5 hashing**. Identical files across different conversations share a single physical storage entry.
-*   **Smart Versioning**: Intelligent filename collision handling—if you upload a new version of a file with the same name, ConverseAI automatically handles versioning to prevent data loss.
-*   **Contextual Visibility**: A dedicated **Files Tab** in every conversation provides a centralized view of all documents active in that context.
-*   **Reference-Aware Purging**: Deleting a file from a conversation only removes its reference. The physical file and its **Vector Index** are only purged when no other conversation references it, ensuring no "broken context" for other chats.
+```text
+North Star Goal
+        ↓
+Goal Decomposition
+        ↓
+Quarterly Objectives
+        ↓
+Monthly Milestones
+        ↓
+Weekly Plans
+        ↓
+Daily Execution
+        ↓
+Feedback Loop (Weekly Review)
+        ↓
+Continuous Reprioritization & Reality Gap Adjustment
+```
 
-### 8. Durable & Scalable Storage
-*   **MinIO**: Securely stores all raw images and documents.
-*   **MongoDB**: Stores conversation metadata, message history, and links to stored artifacts.
+---
 
-## 🛠 Tech Stack
+## 🚀 Core Features
+
+### 1. Goal Decomposition Engine
+Automatically breaks large, vague goals into multi-tiered executable milestones.
+*   *Input Example*: `"Become Senior Engineer at Google"`
+*   *Output Tree*:
+    ```text
+    Senior Engineer
+    ├── Data Structures & Algorithms
+    ├── System Design
+    ├── Distributed Systems
+    ├── Behavioral Interviews
+    ├── Resume & Referrals
+    └── OSS Contributions
+    ```
+
+### 2. Daily Command Center (Prioritized Agenda)
+Surfaces only the highest leverage actions every morning based on impact, strategic alignment, and immediate priorities.
+1.  Solve 2 Graph Problems (Impact: High, Alignment: DSA)
+2.  Study Distributed Transactions (Impact: High, Alignment: System Design)
+3.  Complete OSS Pull Request (Impact: Med, Alignment: Portfolio)
+4.  Reach Out to 2 Referrals (Impact: Med, Alignment: Job Search)
+
+### 3. Intelligent Prioritization Score (IPS)
+Every task receives a dynamic score computed from:
+$$\text{IPS} = f(\text{Impact}, \text{Urgency}, \text{Strategic Alignment}, \text{Dependency Risk}, \text{Effort})$$
+The system continuously reorders outstanding tasks to maximize leverage.
+
+### 4. Progress Intelligence
+Measures actual readiness and competency rather than simple task checkmarks.
+*   *Example (DSA)*: Arrays: 90% | Trees: 80% | Graphs: 50% | DP: 25%
+
+### 5. Long-Term Memory System
+Retains long-term contextual layers:
+*   **Goals**: Target role, target timelines.
+*   **Decisions**: "Selected Temporal for OSS contributions."
+*   **Constraints**: "Preparing for sister's marriage," "Available time: 15 hrs/week."
+*   **Lessons**: "Struggles with Dynamic Programming."
+
+### 6. Killer Feature: Reality Gap Detection
+Measures feasibility by comparing current readiness, target timeline, and available hours:
+*   *Goal*: Google Senior Engineer in 6 Months.
+*   *Analysis*: Current readiness is 40%. Projected readiness is 14 months at 10 hours/week.
+*   *Recommendation*: To hit goal in 6 months, increase weekly study time to 25 hours.
+
+### 7. Learning Engine
+Integrates with custom topics (LeetCode, System Design, Behavioral Stories) using **FSRS-based spaced repetition** to optimize retention.
+
+### 8. Weekly Executive Review
+A weekly collaborative review session with the AI:
+*   **Review**: Plan vs. Actual completions.
+*   **Analysis**: Execution rate, goal alignment, major risks, bottlenecks.
+*   **Outcome**: Automated course corrections and plan for next week.
+
+---
+
+## 🛠️ Technical Architecture
+
+### Target System (Production Stack)
+*   **Frontend**: Next.js, Tailwind CSS, ShadCN
+*   **Backend**: FastAPI / Go
+*   **Database**: PostgreSQL + pgvector
+*   **Workflow Engine**: Temporal
+*   **Agent Framework**: LangGraph
+*   **LLM Providers**: OpenAI, Claude
+
+### Current Pivot Implementation (V1 MVP Stack)
+*   **Frontend**: React, Vite, TypeScript, Tailwind CSS / Custom CSS
 *   **Backend**: Go (Golang)
-*   **Frontend**: React + Vite + TypeScript
-*   **ML Engine**: Ollama (Local LLMs: Gemma 4, Qwen3, DeepSeek OCR)
-*   **Primary DB**: MongoDB (NoSQL)
-*   **Vector DB**: ChromaDB
-*   **Object Storage**: MinIO
+*   **Database**: MongoDB
+*   **Search**: ChromaDB / Local Vector Search
+*   **Storage**: MinIO
+*   **LLM Provider**: Ollama (Local LLM execution)
 
-## ⚠️ Limitations
-*   **Local Performance**: Response speed depends on local hardware (GPU/VRAM).
-*   **Model Switching Latency**: Switching models introduces a small loading delay to ensure only one is active in VRAM.
+---
 
-## 📁 Repository Structure
-*   `cmd/`: Entry points for the application.
-*   `internal/handler/`: REST API handlers.
-*   `internal/service/`: Business logic (Chat, RAG, Events).
-*   `internal/orchestrator/`: Task planning and execution logic.
-*   `internal/manager/`: Resource and model lifecycle management.
-*   `internal/repository/`: Data persistence (MongoDB, File Storage).
-*   `client/`: Frontend React application.
+## 📈 MVP Scope Phases
+
+*   **Phase 1 (Active)**: Goal Management, Task Generation, Competency Progress Tracking, Daily Planning, Weekly Reviews.
+*   **Phase 2**: Learning Engine, FSRS Scheduler, Knowledge Tracking.
+*   **Phase 3**: Opportunity Radar, Job Search Automation, OSS Discovery.
+*   **Phase 4**: Multi-Agent Chief of Staff, Autonomous Planning, Full Career Operating System.

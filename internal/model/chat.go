@@ -26,13 +26,14 @@ type Message struct {
 }
 
 type Conversation struct {
-	ID                primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	UserID            primitive.ObjectID `bson:"user_id" json:"user_id"`
-	Title             string             `bson:"title" json:"title"`
-	Messages          []Message          `bson:"messages" json:"messages"`
-	Summary           string             `bson:"summary,omitempty" json:"summary,omitempty"`
-	SummaryTokenCount int                `bson:"summary_token_count" json:"summary_token_count"`
-	TotalTokens       int                `bson:"total_tokens" json:"total_tokens"`
-	CreatedAt         time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt         time.Time          `bson:"updated_at" json:"updated_at"`
+	ID                primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
+	UserID            primitive.ObjectID  `bson:"user_id" json:"user_id"`
+	ProjectID         *primitive.ObjectID `bson:"project_id,omitempty" json:"project_id,omitempty"`
+	Title             string              `bson:"title" json:"title"`
+	Messages          []Message           `bson:"messages" json:"messages"`
+	Summary           string              `bson:"summary,omitempty" json:"summary,omitempty"`
+	SummaryTokenCount int                 `bson:"summary_token_count" json:"summary_token_count"`
+	TotalTokens       int                 `bson:"total_tokens" json:"total_tokens"`
+	CreatedAt         time.Time           `bson:"created_at" json:"created_at"`
+	UpdatedAt         time.Time           `bson:"updated_at" json:"updated_at"`
 }
