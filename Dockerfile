@@ -14,11 +14,13 @@ RUN go mod download
 COPY . .
 # Copy built frontend assets from Stage 1
 COPY --from=frontend-builder /app/client/dist /app/client/dist
-RUN go build -o main .
+RUN go build -o main ./cmd/app/main.go
+RUN go build -o mcp-server ./cmd/mcp-server/main.go
 
 # --- Stage 3: Final Image ---
 FROM alpine:latest
 WORKDIR /root/
 COPY --from=backend-builder /app/main .
+COPY --from=backend-builder /app/mcp-server .
 EXPOSE 8080
 CMD ["./main"]

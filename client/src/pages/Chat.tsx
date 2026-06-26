@@ -14,6 +14,7 @@ import {
   listConversationFilesApi,
   deleteConversationFileApi,
   type Message,
+  type Conversation,
   type ConversationEvent,
   type Evidence
 } from '../api/chat';

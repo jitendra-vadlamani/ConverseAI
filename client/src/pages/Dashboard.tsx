@@ -68,7 +68,7 @@ export const Dashboard: React.FC = () => {
   const [inputValue, setInputValue] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [models, setModels] = useState<any[]>([]);
-  const [selectedModel, setSelectedModel] = useState('gemma4:latest');
+  const [selectedModel, setSelectedModel] = useState('gemma4:e4b');
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
   const fetchProject = async () => {

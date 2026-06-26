@@ -39,17 +39,17 @@ func (h *OrchestratorHandler) Orchestrate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Fallback to gemma4:latest if no model is provided
+	// Fallback to gemma4:e4b if no model is provided
 	modelToUse := body.ModelName
 	if modelToUse == "" {
-		modelToUse = "gemma4:latest"
+		modelToUse = "gemma4:e4b"
 	}
 
 	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
 	uID, _ := primitive.ObjectIDFromHex(userID)
 	runID := primitive.NewObjectID() // Track this ad-hoc run as a "conversation"
 
-	result, _, _, err := h.orchestrator.Run(r.Context(), body.Query, modelToUse, nil, runID, uID)
+	result, _, _, err := h.orchestrator.Run(r.Context(), body.Query, modelToUse, nil, runID, uID, nil, nil)
 	
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {

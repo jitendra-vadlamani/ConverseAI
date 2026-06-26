@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"embed"
 	"log"
 	"net/http"
 	"os"
@@ -10,12 +9,10 @@ import (
 	"syscall"
 	"time"
 
+	"ai-chat/client"
 	"ai-chat/internal/app"
 	"ai-chat/internal/config"
 )
-
-//go:embed all:client/dist
-var staticContent embed.FS
 
 func main() {
 	// Initialize Config
@@ -25,7 +22,7 @@ func main() {
 	application := app.NewApp(cfg)
 
 	// Initialize the application dependencies and router
-	if err := application.Initialize(staticContent); err != nil {
+	if err := application.Initialize(client.StaticContent); err != nil {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 

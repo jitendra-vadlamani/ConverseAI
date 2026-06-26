@@ -8,6 +8,7 @@ export interface Message {
   token_count?: number;
   is_summarized?: boolean;
   created_at?: string;
+  attachments?: string[];
 }
 
 export interface Conversation {

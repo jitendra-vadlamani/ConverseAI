@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "converseai-tools": {
+      "command": "./mcp-server-wrapper.sh"
+    }
+  }
+}

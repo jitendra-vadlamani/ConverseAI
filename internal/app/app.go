@@ -76,14 +76,10 @@ func (a *App) Initialize(staticContent embed.FS) error {
 
 	// 2. Services
 	authService := service.NewAuthService(userRepo, a.cfg)
-	ragService := service.NewRagService(a.cfg, ollamaClient)
-	searchService := service.NewSearchService()
 	cosService := service.NewCosService(ollamaClient, a.cfg)
 
-	// Initialize MCP Registry and register built-in server
+	// Initialize MCP Registry
 	a.mcpRegistry = mcp.NewRegistry()
-	builtinServer := mcp.NewBuiltinServer(ollamaClient, a.storageService, ragService, searchService)
-	a.mcpRegistry.RegisterServer("builtin", builtinServer)
 
 	// Load external servers configured in workspace
 	if err := a.mcpRegistry.LoadExternalServers(context.Background(), "."); err != nil {
@@ -91,12 +87,10 @@ func (a *App) Initialize(staticContent embed.FS) error {
 	}
 
 	// 3. Orchestration
-	planner := orchestrator.NewPlanner(ollamaClient, modelManager, systemLLMRepo, a.cfg, a.mcpRegistry)
-	validator := orchestrator.NewValidator(systemLLMRepo)
-	executor := orchestrator.NewExecutor(ollamaClient, modelManager, a.storageService, eventRepo, eventBroker, systemLLMRepo, a.mcpRegistry)
-	orch := orchestrator.NewOrchestrator(planner, validator, executor, eventRepo, eventBroker)
+	executor := orchestrator.NewExecutor(a.mcpRegistry, eventRepo, eventBroker)
+	orch := orchestrator.NewOrchestrator(ollamaClient, a.mcpRegistry, executor, eventRepo, eventBroker)
 
-	chatService := service.NewChatService(chatRepo, projectRepo, systemLLMRepo, ollamaClient, modelManager, orch, planner, a.storageService, eventRepo, eventBroker, ragService, a.cfg)
+	chatService := service.NewChatService(chatRepo, projectRepo, systemLLMRepo, ollamaClient, modelManager, orch, a.mcpRegistry, a.storageService, eventRepo, eventBroker, a.cfg)
 
 	// 4. Handlers
 	authHandler := handler.NewAuthHandler(authService)
@@ -132,7 +126,7 @@ func (a *App) registerRoutes(
 	})
 
 	// Static Web Client Files
-	dist, err := fs.Sub(staticContent, "client/dist")
+	dist, err := fs.Sub(staticContent, "dist")
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -71,7 +71,7 @@ Do not write any other markdown text, only raw JSON.`, goal)
 
 	modelName := s.cfg.DefaultPlannerModel
 	if modelName == "" {
-		modelName = "gemma4:latest"
+		modelName = "gemma4:e4b"
 	}
 
 	resp, err := s.ollamaClient.Generate(ctx, &ollama.GenerateRequest{
@@ -170,7 +170,7 @@ Format with clean markdown and use a supportive but strict, realistic tone.`,
 
 	modelName := s.cfg.DefaultChatModel
 	if modelName == "" {
-		modelName = "gemma4:latest"
+		modelName = "gemma4:e4b"
 	}
 
 	resp, err := s.ollamaClient.Generate(ctx, &ollama.GenerateRequest{
@@ -250,7 +250,7 @@ Format in markdown, and write in an encouraging but objective tone.`,
 
 	modelName := s.cfg.DefaultChatModel
 	if modelName == "" {
-		modelName = "gemma4:latest"
+		modelName = "gemma4:e4b"
 	}
 
 	resp, err := s.ollamaClient.Generate(ctx, &ollama.GenerateRequest{

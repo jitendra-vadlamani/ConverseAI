@@ -1,138 +1,242 @@
 package orchestrator
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
-	"ai-chat/internal/model"
-	"ai-chat/internal/repository"
 	"ai-chat/internal/events"
+	"ai-chat/internal/mcp"
+	"ai-chat/internal/model"
 	"ai-chat/internal/ollama"
+	"ai-chat/internal/repository"
+
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type Orchestrator interface {
-	Run(ctx context.Context, query string, modelName string, images []string, convID, userID primitive.ObjectID) (*model.OrchestrationResult, int, int, error)
+	Run(ctx context.Context, query string, modelName string, images []string, convID, userID primitive.ObjectID, onThought func(string), onDelta func(string)) (*model.OrchestrationResult, int, int, error)
 }
 
 type systemOrchestrator struct {
-	planner     Planner
-	validator   Validator
-	executor    Executor
-	eventRepo   repository.EventRepository
-	eventBroker events.EventBroker
+	ollamaClient ollama.Client
+	mcpRegistry  mcp.Registry
+	executor     Executor
+	eventRepo    repository.EventRepository
+	eventBroker  events.EventBroker
 }
 
-func NewOrchestrator(planner Planner, validator Validator, executor Executor, eventRepo repository.EventRepository, eventBroker events.EventBroker) Orchestrator {
+func NewOrchestrator(
+	client ollama.Client,
+	mcpRegistry mcp.Registry,
+	executor Executor,
+	eventRepo repository.EventRepository,
+	eventBroker events.EventBroker,
+) Orchestrator {
 	return &systemOrchestrator{
-		planner:     planner,
-		validator:   validator,
-		executor:    executor,
-		eventRepo:   eventRepo,
-		eventBroker: eventBroker,
+		ollamaClient: client,
+		mcpRegistry:  mcpRegistry,
+		executor:     executor,
+		eventRepo:    eventRepo,
+		eventBroker:  eventBroker,
 	}
 }
 
-func (o *systemOrchestrator) Run(ctx context.Context, query string, modelName string, images []string, convID, userID primitive.ObjectID) (*model.OrchestrationResult, int, int, error) {
-	fmt.Printf("[Orchestrator] Starting tool-based workflow for: %s\n", query)
-	
+type execStep struct {
+	Tool   string
+	Input  string
+	Output string
+}
+
+func (o *systemOrchestrator) Run(
+	ctx context.Context,
+	query string,
+	modelName string,
+	images []string,
+	convID, userID primitive.ObjectID,
+	onThought func(string),
+	onDelta func(string),
+) (*model.OrchestrationResult, int, int, error) {
+	fmt.Printf("[Orchestrator] Starting Hermes-inspired streaming agent workflow for: %s\n", query)
+
+	if onThought == nil {
+		onThought = func(string) {}
+	}
+	if onDelta == nil {
+		onDelta = func(string) {}
+	}
+
 	result := &model.OrchestrationResult{
 		Query:     query,
 		StartTime: time.Now(),
 	}
 
+	// 1. Fetch available tools from registry
+	tools, err := o.mcpRegistry.ListTools(ctx)
+	if err != nil {
+		fmt.Printf("[Orchestrator] Warning: Failed to list tools from MCP: %v\n", err)
+	}
+
+	var toolsDesc strings.Builder
+	for _, t := range tools {
+		if t.Name == "ingest_document" || t.Name == "delete_document" {
+			continue
+		}
+		schemaBytes, _ := json.Marshal(t.InputSchema)
+		toolsDesc.WriteString(fmt.Sprintf("- Name: %s\n  Description: %s\n  Schema: %s\n\n", t.Name, t.Description, string(schemaBytes)))
+	}
+
+	// 2. Build system instructions
+	systemPrompt := fmt.Sprintf(`You are a high-fidelity Search & Reasoning agent designed to solve complex queries.
+You have access to the following tools:
+%s
+
+## Instructions:
+1. Evaluate if a tool is needed to answer the user query or if you have sufficient information.
+2. If you need a tool, you must think step-by-step first inside <thought>...</thought> tags, and then make a tool call inside <tool_call>...</tool_call> tags.
+   Format the tool call as a JSON object: {"name": "tool_name", "arguments": {"arg1": "val1"}}
+3. When you receive a tool response, analyze it and decide whether you need another tool call (up to 5 steps total).
+4. If you have all the information needed, do NOT call any tools. Provide your final response directly. Keep your reasoning inside <thought>...</thought> tags, and the final answer outside of any tags.
+5. All final answers must be fully grounded in the collected evidence. Every claim you make MUST cite the source (e.g. [Source: name]). If there are conflicts or outdated sources, mention them clearly.
+`, toolsDesc.String())
+
+	// Initialize conversation context for the LLM
+	messages := []ollama.ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: query, Images: images},
+	}
+
 	totalInputTokens, totalOutputTokens := 0, 0
-	var history []model.PlanStep
-	maxSteps := 5 // Practical default
-	
-	// Initial Event
+	var executedSteps []execStep
+
+	// Emit initial orchestration started event
 	o.emitEvent(ctx, convID, userID, model.EventOrchestrationStarted, map[string]interface{}{
 		"query": query, "model": modelName,
 	})
 
-	for i := 0; i < maxSteps; i++ {
-		fmt.Printf("[Orchestrator] Step %d\n", i+1)
+	maxSteps := 5
+	for stepIdx := 0; stepIdx < maxSteps; stepIdx++ {
+		fmt.Printf("[Orchestrator] Step %d / %d\n", stepIdx+1, maxSteps)
 
-		// 1. Plan NEXT step
-		step, inT, outT, err := o.planner.PlanNext(ctx, query, history, modelName, images)
+		// Call LLM stream
+		rawResponse, inT, outT, err := o.callLLMStream(ctx, modelName, messages, onThought, onDelta)
 		totalInputTokens += inT
 		totalOutputTokens += outT
-
 		if err != nil {
-			fmt.Printf("[Orchestrator] Planning failed: %v\n", err)
-			result.Error = fmt.Sprintf("Planning failed at step %d: %v", i+1, err)
+			fmt.Printf("[Orchestrator] LLM stream call failed: %v\n", err)
+			result.Error = fmt.Sprintf("LLM call failed at step %d: %v", stepIdx+1, err)
 			o.finalize(result, false)
 			return result, totalInputTokens, totalOutputTokens, err
 		}
+
+		// Parse the output to see if there is a tool call
+		_, toolCallStr, _ := parseAccumulated(rawResponse)
+		if toolCallStr == "" {
+			// No tool call generated by the model. We are done!
+			fmt.Printf("[Orchestrator] No tool call detected. Agent finalized.\n")
+			break
+		}
+
+		// Parse the tool call JSON
+		var call struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(toolCallStr)), &call); err != nil {
+			fmt.Printf("[Orchestrator] Failed to parse tool call JSON: %v, raw: %s\n", err, toolCallStr)
+			// Append error response to model so it can try again or fail gracefully
+			errStr := fmt.Sprintf("<tool_response>\n{\"error\": \"Failed to parse tool call JSON: %v\"}\n</tool_response>", err)
+			messages = append(messages, ollama.ChatMessage{Role: "assistant", Content: rawResponse})
+			messages = append(messages, ollama.ChatMessage{Role: "user", Content: errStr})
+			continue
+		}
+
+		fmt.Printf("[Orchestrator] Detected tool call: %s with args: %v\n", call.Name, call.Arguments)
 
 		o.emitEvent(ctx, convID, userID, model.EventToolDecision, map[string]interface{}{
-			"step": i + 1, "tool": step.Tool, "reason": step.Reason, "confidence": step.Confidence,
+			"step": stepIdx + 1, "tool": call.Name, "reason": fmt.Sprintf("Agent called tool: %s", call.Name), "confidence": 1.0,
 		})
 
-		// Emit Sufficiency Evaluation Event if present
-		if eval, ok := step.Input["evaluation"].(map[string]interface{}); ok {
-			o.emitEvent(ctx, convID, userID, model.EventSufficiencyChecked, map[string]interface{}{
-				"step": i + 1,
-				"covered": eval["covered_aspects"],
-				"missing": eval["missing_aspects"],
-				"score": eval["sufficiency_score"],
-			})
-		}
+		o.emitEvent(ctx, convID, userID, model.EventTaskStarted, map[string]interface{}{
+			"tool": call.Name, "message": fmt.Sprintf("Starting tool: %s", call.Name),
+		})
 
-		// 2. Execute
-		output, tokens, err := o.executor.ExecuteStep(ctx, step, convID, userID)
-		totalOutputTokens += tokens
+		// Execute tool call
+		output, err := o.executor.ExecuteStep(ctx, call.Name, call.Arguments, convID, userID)
 		if err != nil {
-			fmt.Printf("[Orchestrator] Execution failed: %v\n", err)
-			result.Error = fmt.Sprintf("Execution failed at step %d: %v", i+1, err)
-			o.finalize(result, false)
-			return result, totalInputTokens, totalOutputTokens, err
+			fmt.Printf("[Orchestrator] Tool execution failed: %v\n", err)
+			output = fmt.Sprintf("Error during tool execution: %v", err)
 		}
 
-		// Finalize
-		step.Output = output
-		history = append(history, *step)
+		o.emitEvent(ctx, convID, userID, model.EventTaskFinished, map[string]interface{}{
+			"tool": call.Name, "success": err == nil,
+		})
 
-		if step.Tool == model.ToolNone {
-			fmt.Printf("[Orchestrator] Step %d: AI finalized. Generating grounded answer...\n", i+1)
-			break
-		}
+		// Log executed step
+		inputBytes, _ := json.Marshal(call.Arguments)
+		executedSteps = append(executedSteps, execStep{
+			Tool:   call.Name,
+			Input:  string(inputBytes),
+			Output: output,
+		})
 
-		// Hard cap at maxSteps
-		if i == maxSteps-1 {
+		// Append messages history for the next iteration
+		toolResponseStr := fmt.Sprintf("<tool_response>\n%s\n</tool_response>", output)
+		messages = append(messages, ollama.ChatMessage{Role: "assistant", Content: rawResponse})
+		messages = append(messages, ollama.ChatMessage{Role: "user", Content: toolResponseStr})
+
+		if stepIdx == maxSteps-1 {
 			fmt.Printf("[Orchestrator] Warning: Reached max steps (%d). Generating best-effort answer...\n", maxSteps)
-			break
+			// Trigger a final call asking it to summarize
+			messages = append(messages, ollama.ChatMessage{Role: "user", Content: "Please synthesize the final answer now using the evidence collected above."})
+			finalSynth, inT, outT, err := o.callLLMStream(ctx, modelName, messages, onThought, onDelta)
+			totalInputTokens += inT
+			totalOutputTokens += outT
+			if err == nil {
+				messages = append(messages, ollama.ChatMessage{Role: "assistant", Content: finalSynth})
+			}
 		}
 	}
 
-	// 3. Final Grounded Generation
-	o.emitEvent(ctx, convID, userID, model.EventGroundedGenerationStarted, map[string]interface{}{
-		"query": query, "message": "Synthesizing evidence into the final grounded response...",
-	})
-	finalAnswer, inT, outT, err := o.generateGroundedAnswer(ctx, query, history, modelName)
-	totalInputTokens += inT
-	totalOutputTokens += outT
-	if err != nil {
-		fmt.Printf("[Orchestrator] Final generation failed: %v\n", err)
-		result.Error = fmt.Sprintf("Final generation failed: %v", err)
-		o.finalize(result, false)
-		return result, totalInputTokens, totalOutputTokens, err
+	// Extract the final assistant content
+	var finalAnswer string
+	if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+		_, _, textContent := parseAccumulated(messages[len(messages)-1].Content)
+		finalAnswer = textContent
+	} else {
+		// Fallback: request a final generation to synthesize collected history
+		log.Println("[Orchestrator] Fetching final synthesized response...")
+		o.emitEvent(ctx, convID, userID, model.EventGroundedGenerationStarted, map[string]interface{}{
+			"query": query, "message": "Synthesizing evidence into the final grounded response...",
+		})
+		
+		messages = append(messages, ollama.ChatMessage{Role: "user", Content: "Please summarize your final response now. Do not call any tools."})
+		synth, inT, outT, err := o.callLLMStream(ctx, modelName, messages, onThought, onDelta)
+		totalInputTokens += inT
+		totalOutputTokens += outT
+		if err == nil {
+			_, _, textContent := parseAccumulated(synth)
+			finalAnswer = textContent
+		} else {
+			finalAnswer = "Failed to generate final answer."
+		}
 	}
 
-	// For legacy support, translate history to Tasks in result
-	result.Plan = make([]model.Task, len(history)+1)
-	for i, h := range history {
+	// Populate legacy OrchestrationResult.Plan structure
+	result.Plan = make([]model.Task, len(executedSteps)+1)
+	for i, s := range executedSteps {
 		result.Plan[i] = model.Task{
-			Type:   model.TaskType(h.Tool),
-			Input:  h.Reason,
-			Output: h.Output,
+			Type:   model.TaskType(s.Tool),
+			Input:  s.Input,
+			Output: s.Output,
 			Status: "completed",
 		}
 	}
-	// Add the final grounded answer as the last task
-	result.Plan[len(history)] = model.Task{
+	result.Plan[len(executedSteps)] = model.Task{
 		Type:   model.TaskChat,
 		Input:  "Generate final grounded response",
 		Output: finalAnswer,
@@ -141,42 +245,56 @@ func (o *systemOrchestrator) Run(ctx context.Context, query string, modelName st
 
 	o.finalize(result, true)
 	o.emitEvent(ctx, convID, userID, model.EventOrchestrationFinished, map[string]interface{}{
-		"success": true, "steps": len(history), "total_tokens": totalInputTokens + totalOutputTokens,
+		"success": true, "steps": len(executedSteps), "total_tokens": totalInputTokens + totalOutputTokens,
 	})
 
 	return result, totalInputTokens, totalOutputTokens, nil
 }
 
-func (o *systemOrchestrator) generateGroundedAnswer(ctx context.Context, query string, history []model.PlanStep, modelName string) (string, int, int, error) {
-	var evidence strings.Builder
-	for i, h := range history {
-		if h.Tool != model.ToolNone && h.Output != "" {
-			evidence.WriteString(fmt.Sprintf("\n--- Evidence %d (Source: %s) ---\n%s\n", i+1, h.Tool, h.Output))
-		}
-	}
-
-	prompt := fmt.Sprintf(`You are a grounded assistant. Based on the following evidence collected for the query: "%s", provide a final, comprehensive answer.
-
-## Evidence Collected:
-%s
-
-## Instructions:
-1. Every claim you make MUST be followed by a citation marker like [1] or [Source: name].
-2. **Prioritize high-confidence evidence**: Use "Final Score" (0.0-1.0) as a guide for reliability.
-3. **Handle Conflicts**: If evidence is marked as "!! CONFLICT !!", explicitly mention the disagreement and try to synthesize the most likely truth or state why it is debated.
-4. If sources are marked as "Outdated" (low Freshness), acknowledge that information might have changed.
-5. Your response should be professional, clear, and strictly grounded in the provided Evidence.
-
-Final Grounded Answer:`, query, evidence.String())
-
-	genResp, err := o.planner.(*ollamaPlanner).client.Generate(ctx, &ollama.GenerateRequest{
-		Model: modelName, Prompt: prompt, Stream: false,
+func (o *systemOrchestrator) callLLMStream(
+	ctx context.Context,
+	modelName string,
+	messages []ollama.ChatMessage,
+	onThought func(string),
+	onDelta func(string),
+) (string, int, int, error) {
+	resp, err := o.ollamaClient.Chat(ctx, &ollama.ChatRequest{
+		Model: modelName, Messages: messages, Stream: true,
 	})
 	if err != nil {
 		return "", 0, 0, err
 	}
+	defer resp.Body.Close()
 
-	return genResp.Response, genResp.PromptEvalCount, genResp.EvalCount, nil
+	var rawAccumulated strings.Builder
+	parser := NewStreamParser(onThought, onDelta)
+
+	scanner := bufio.NewScanner(resp.Body)
+	var promptTokens, evalTokens int
+
+	for scanner.Scan() {
+		var line struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Done            bool `json:"done"`
+			PromptEvalCount int  `json:"prompt_eval_count"`
+			EvalCount       int  `json:"eval_count"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
+			if line.Message.Content != "" {
+				rawAccumulated.WriteString(line.Message.Content)
+				parser.Feed(line.Message.Content)
+			}
+			if line.Done {
+				promptTokens = line.PromptEvalCount
+				evalTokens = line.EvalCount
+				break
+			}
+		}
+	}
+
+	return rawAccumulated.String(), promptTokens, evalTokens, nil
 }
 
 func (o *systemOrchestrator) finalize(result *model.OrchestrationResult, success bool) {
@@ -184,7 +302,12 @@ func (o *systemOrchestrator) finalize(result *model.OrchestrationResult, success
 	result.EndTime = time.Now()
 }
 
-func (o *systemOrchestrator) emitEvent(ctx context.Context, conversationID, userID primitive.ObjectID, eventType model.EventType, payload map[string]interface{}) {
+func (o *systemOrchestrator) emitEvent(
+	ctx context.Context,
+	conversationID, userID primitive.ObjectID,
+	eventType model.EventType,
+	payload map[string]interface{},
+) {
 	event := model.ConversationEvent{
 		ConversationID: conversationID,
 		UserID:         userID,
@@ -196,4 +319,91 @@ func (o *systemOrchestrator) emitEvent(ctx context.Context, conversationID, user
 		fmt.Printf("[Orchestrator] Warning: Failed to store event %s: %v\n", eventType, err)
 	}
 	o.eventBroker.Publish(event)
+}
+
+// Streaming XML / Tag Parser
+
+type StreamParser struct {
+	raw          string
+	lastThought  string
+	lastText     string
+	onThought    func(string)
+	onDelta      func(string)
+}
+
+func NewStreamParser(onThought, onDelta func(string)) *StreamParser {
+	return &StreamParser{
+		onThought: onThought,
+		onDelta:   onDelta,
+	}
+}
+
+func (p *StreamParser) Feed(chunk string) {
+	p.raw += chunk
+	thoughts, _, text := parseAccumulated(p.raw)
+
+	if len(thoughts) > len(p.lastThought) {
+		diff := thoughts[len(p.lastThought):]
+		if p.onThought != nil {
+			p.onThought(diff)
+		}
+		p.lastThought = thoughts
+	}
+
+	if len(text) > len(p.lastText) {
+		diff := text[len(p.lastText):]
+		if p.onDelta != nil {
+			p.onDelta(diff)
+		}
+		p.lastText = text
+	}
+}
+
+func parseAccumulated(raw string) (thoughts, toolCalls, text string) {
+	var th, tc, tx strings.Builder
+
+	i := 0
+	n := len(raw)
+	for i < n {
+		if i+9 <= n && raw[i:i+9] == "<thought>" {
+			i += 9
+			start := i
+			for i < n {
+				if i+10 <= n && raw[i:i+10] == "</thought>" {
+					th.WriteString(raw[start:i])
+					i += 10
+					break
+				}
+				i++
+			}
+			if i >= n {
+				th.WriteString(raw[start:n])
+			}
+		} else if i+11 <= n && raw[i:i+11] == "<tool_call>" {
+			i += 11
+			start := i
+			for i < n {
+				if i+12 <= n && raw[i:i+12] == "</tool_call>" {
+					tc.WriteString(raw[start:i])
+					i += 12
+					break
+				}
+				i++
+			}
+			if i >= n {
+				tc.WriteString(raw[start:n])
+			}
+		} else {
+			// Check prefix match to avoid printing tag openings into text
+			if raw[i] == '<' {
+				if (i+9 <= n && strings.HasPrefix("<thought>", raw[i:])) ||
+					(i+11 <= n && strings.HasPrefix("<tool_call>", raw[i:])) {
+					break
+				}
+			}
+			tx.WriteByte(raw[i])
+			i++
+		}
+	}
+	return th.String(), tc.String(), tx.String()
 }

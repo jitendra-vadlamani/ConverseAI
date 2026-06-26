@@ -6,7 +6,25 @@ Unlike standard productivity tools that merely store tasks, Chief of Staff AI ma
 
 ---
 
-## 🎯 Vision
+## 🎯 Vision & Core Concepts
+
+### 📊 Dashboard-Centric Flow
+The core application acts as a personal execution dashboard. Users can easily view and manage their primary focus areas, schedules, action items, and context in a clean, unified space.
+
+### 🎯 Goal Workspaces
+Users can define structured **Goals** (e.g., "Become Senior Engineer at Google").
+*   **Task Connections**: Each goal can be connected to specific external or internal tasks or task lists.
+*   **Calendar Integration**: Each goal can be connected to external calendar services.
+*   **Information Gathering**: Based on these connections, the application automatically pulls and synchronizes execution schedules, progress, and relevant constraints.
+
+### 💬 Dual Chat Architecture (Strict Separation)
+ConverseAI provides two separate chat environments to ensure context clarity and avoid cognitive pollution:
+1.  **General Chat**: A general-purpose playground for general productivity planning, queries, and unstructured research.
+2.  **Goal-Specific Chat**: Housed strictly inside each goal's workspace. Conversations here are fully grounded on the specific goal's tasks, progress, calendar events, and memory. General chats and goal-specific chats are kept completely isolated and never merged.
+
+---
+
+## 🎯 Vision Pillars
 
 Most ambitious professionals do not fail because of a lack of knowledge. They fail because of:
 *   **Poor Prioritization**: Inability to distinguish high-impact actions from noise.

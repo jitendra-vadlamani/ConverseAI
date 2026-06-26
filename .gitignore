@@ -1,6 +1,8 @@
 # Go
 ai-chat-app
 ai-chat-app.exe
+mcp-server
+mcp-server.exe
 *.exe
 *.test
 *.prof

@@ -1,6 +1,6 @@
 [
     {
-        "model_name": "gemma4:latest",
+        "model_name": "gemma4:e4b",
         "name": "Gemma 4",
         "context_window": 131072,
         "description": "Google's 8B parameter model with advanced capabilities including Vision, Audio, Tools, and Thinking.",

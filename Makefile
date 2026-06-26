@@ -8,7 +8,8 @@ build-client:
 
 build-server:
 	@echo "Building Go server (embedding React assets)..."
-	go build -o $(BINARY_NAME) .
+	go build -o $(BINARY_NAME) ./cmd/app/main.go
+	go build -o mcp-server ./cmd/mcp-server/main.go
 
 build-all: build-client build-server
 
@@ -19,7 +20,8 @@ dev-client:
 	cd client && npm run dev
 
 dev-server:
-	go run .
+	go build -o mcp-server ./cmd/mcp-server/main.go
+	go run ./cmd/app/main.go
 
 docker-up:
 	docker-compose up --build -d
@@ -40,4 +42,5 @@ docker-restart: docker-down docker-up
 
 clean:
 	rm -f $(BINARY_NAME)
+	rm -f mcp-server
 	rm -rf client/dist

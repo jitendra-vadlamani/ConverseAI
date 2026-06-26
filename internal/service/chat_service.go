@@ -12,12 +12,13 @@ import (
 	"time"
 
 	"ai-chat/internal/config"
+	"ai-chat/internal/events"
+	"ai-chat/internal/manager"
+	"ai-chat/internal/mcp"
 	"ai-chat/internal/model"
 	"ai-chat/internal/ollama"
 	"ai-chat/internal/orchestrator"
-	"ai-chat/internal/manager"
 	"ai-chat/internal/repository"
-	"ai-chat/internal/events"
 	"ai-chat/internal/storage"
 	"ai-chat/internal/util"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -42,16 +43,15 @@ type chatService struct {
 	ollamaClient   ollama.Client
 	modelManager   manager.ModelManager
 	orchestrator   orchestrator.Orchestrator
-	planner        orchestrator.Planner
+	mcpRegistry    mcp.Registry
 	storageService storage.StorageService
 	eventRepo      repository.EventRepository
 	eventBroker    events.EventBroker
-	ragService     RagService
 	systemRepo     repository.SystemLLMRepository
 	cfg            *config.Config
 }
 
-func NewChatService(repo repository.ChatRepository, projectRepo repository.ProjectRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, planner orchestrator.Planner, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, ragService RagService, cfg *config.Config) ChatService {
+func NewChatService(repo repository.ChatRepository, projectRepo repository.ProjectRepository, systemRepo repository.SystemLLMRepository, ollamaClient ollama.Client, modelManager manager.ModelManager, orch orchestrator.Orchestrator, mcpRegistry mcp.Registry, storageService storage.StorageService, eventRepo repository.EventRepository, eventBroker events.EventBroker, cfg *config.Config) ChatService {
 	return &chatService{
 		repo:           repo,
 		projectRepo:    projectRepo,
@@ -59,11 +59,10 @@ func NewChatService(repo repository.ChatRepository, projectRepo repository.Proje
 		ollamaClient:   ollamaClient,
 		modelManager:   modelManager,
 		orchestrator:   orch,
-		planner:        planner,
+		mcpRegistry:    mcpRegistry,
 		storageService: storageService,
 		eventRepo:      eventRepo,
 		eventBroker:    eventBroker,
-		ragService:     ragService,
 		cfg:            cfg,
 	}
 }
@@ -138,8 +137,10 @@ func (s *chatService) DeleteConversation(ctx context.Context, id string) error {
 				if err := s.storageService.Delete(ctx, fileID); err != nil {
 					log.Printf("[ChatService] Warning: Failed to delete attachment %s: %v", fileID, err)
 				}
-				collectionName := fmt.Sprintf("user-knowledge-%s", conv.UserID.Hex())
-				if err := s.ragService.DeleteFileKnowledge(ctx, collectionName, fileID); err != nil {
+				mcpCtx := context.WithValue(ctx, mcp.UserIDKey, conv.UserID)
+				mcpCtx = context.WithValue(mcpCtx, mcp.ConversationIDKey, conv.ID)
+				_, err := s.mcpRegistry.CallTool(mcpCtx, "delete_document", map[string]interface{}{"file_id": fileID})
+				if err != nil {
 					log.Printf("[ChatService] Warning: Failed to delete RAG knowledge for %s: %v", fileID, err)
 				}
 			}
@@ -175,8 +176,10 @@ func (s *chatService) DeleteConversationFile(ctx context.Context, userID, id, fi
 		if err := s.storageService.Delete(ctx, fileID); err != nil {
 			log.Printf("[ChatService] Warning: Failed to delete binary %s: %v", fileID, err)
 		}
-		collectionName := fmt.Sprintf("user-knowledge-%s", userID)
-		if err := s.ragService.DeleteFileKnowledge(ctx, collectionName, fileID); err != nil {
+		mcpCtx := context.WithValue(ctx, mcp.UserIDKey, uID)
+		mcpCtx = context.WithValue(mcpCtx, mcp.ConversationIDKey, convID)
+		_, err := s.mcpRegistry.CallTool(mcpCtx, "delete_document", map[string]interface{}{"file_id": fileID})
+		if err != nil {
 			log.Printf("[ChatService] Warning: Failed to delete vector info for %s: %v", fileID, err)
 		}
 	}
@@ -222,22 +225,33 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, mode
 	}
 
 	// 2. RAG Semantic Search
-	collectionName := fmt.Sprintf("user-knowledge-%s", conv.UserID.Hex())
-	ragEvidences, err := s.ragService.Search(tCtx, collectionName, prompt, 10, attachmentIDs)
+	mcpCtx := context.WithValue(tCtx, mcp.UserIDKey, conv.UserID)
+	mcpCtx = context.WithValue(mcpCtx, mcp.ConversationIDKey, conv.ID)
+	
+	res, err := s.mcpRegistry.CallTool(mcpCtx, "retrieve_documents", map[string]interface{}{"query": prompt})
+	
+	var ragResultText string
+	if err == nil && res != nil {
+		var sb strings.Builder
+		for _, content := range res.Content {
+			if content.Type == "text" {
+				sb.WriteString(content.Text)
+			}
+		}
+		ragResultText = sb.String()
+	}
+
+	count := 0
 	if err != nil {
 		log.Printf("[ChatService] Warning: RAG search failed: %v", err)
+	} else if ragResultText != "" {
+		count = strings.Count(ragResultText, "[Source:")
+		extraContext += "\n### RELEVANT KNOWLEDGE FROM YOUR DOCUMENTS:\n" + ragResultText + "\n"
 	}
+
 	s.emitEvent(tCtx, conv.ID, conv.UserID, model.EventRAGSearchFinished, map[string]interface{}{
-		"count": len(ragEvidences), "message": fmt.Sprintf("Search completed. Found %d relevant snippets using %s.", len(ragEvidences), modelName),
+		"count": count, "message": fmt.Sprintf("Search completed. Found %d relevant snippets using %s.", count, modelName),
 	})
-	if len(ragEvidences) > 0 {
-		var ragText strings.Builder
-		ragText.WriteString("\n### RELEVANT KNOWLEDGE FROM YOUR DOCUMENTS:\n")
-		for _, ev := range ragEvidences {
-			ragText.WriteString(fmt.Sprintf("[Source: %s]\n%s\n---\n", ev.Source, ev.Content))
-		}
-		extraContext += ragText.String()
-	}
 
 	finalPrompt := prompt
 	if extraContext != "" {
@@ -268,51 +282,17 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, mode
 	// so direct chat naturally handles "what's in this PDF?" style questions.
 	// We only invoke the expensive LLM planner for detected multi-step queries.
 
-	isOrchestration := false
-	var plan []model.Task
-
-	if needsOrchestration(prompt) {
-		onThought("[Planning] Multi-step request detected, analyzing...\n")
-		plannerModel := llmConfig.ModelName
-		if plannerModel == "" {
-			plannerModel = s.cfg.DefaultPlannerModel
-		}
-
-		var inT, outT int
-		plan, inT, outT, err = s.planner.Plan(tCtx, finalPrompt, plannerModel, images)
-		userTokenCount += inT
-		aiTokenCount += outT
-
-		// Emit Planning Event
-		eventPayload := map[string]interface{}{
-			"plan": plan, "model": plannerModel, "message": fmt.Sprintf("Query analyzed using %s: identified %d atomic tasks for processing.", plannerModel, len(plan)),
-		}
-		if err != nil {
-			eventPayload["error"] = err.Error()
-			eventPayload["message"] = "Planning failed: " + err.Error()
-		}
-		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventPlannerOutput, eventPayload)
-
-		// Safety net: if planner returns a single chat task, fall back to direct chat
-		if err == nil && len(plan) > 0 {
-			if len(plan) > 1 || plan[0].Type != model.TaskChat {
-				isOrchestration = true
-			}
-		}
-	}
-
+	isOrchestration := needsOrchestration(prompt)
 	var fullAIResponse, fullReasoning string
 
 	if isOrchestration {
-		onThought(fmt.Sprintf("[Orchestration] Executing %d tasks...\n", len(plan)))
-		s.emitEvent(context.Background(), conv.ID, conv.UserID, model.EventOrchestrationStarted, map[string]interface{}{
-			"task_index": len(plan), "primary_model": modelName, "message": fmt.Sprintf("Orchestration started: using %s as primary coordinator for %d tasks.", modelName, len(plan)),
-		})
+		onThought("[Orchestration] Multi-step request detected, executing reasoning agent loop...\n")
 
 		var result *model.OrchestrationResult
 		var orchErr error
 		var inT, outT int
-		result, inT, outT, orchErr = s.orchestrator.Run(tCtx, finalPrompt, llmConfig.ModelName, images, conv.ID, conv.UserID)
+		
+		result, inT, outT, orchErr = s.orchestrator.Run(tCtx, finalPrompt, llmConfig.ModelName, images, conv.ID, conv.UserID, onThought, onDelta)
 		userTokenCount += inT
 		aiTokenCount += outT
 		err = orchErr
@@ -330,13 +310,10 @@ func (s *chatService) StreamCompletion(ctx context.Context, conversationID, mode
 			onDelta(fmt.Sprintf("\nError during orchestration: %v", err))
 			fullAIResponse = fmt.Sprintf("Orchestration failed: %v", err)
 		} else {
-			var sb strings.Builder
-			sb.WriteString("### Orchestrated Results\n\n")
-			for _, t := range result.Plan {
-				sb.WriteString(fmt.Sprintf("#### Task: %s\n%s\n\n", t.Type, t.Output))
+			if len(result.Plan) > 0 {
+				// The final response is stored in the last task's Output
+				fullAIResponse = result.Plan[len(result.Plan)-1].Output
 			}
-			fullAIResponse = sb.String()
-			onDelta(fullAIResponse)
 		}
 	} else {
 		if llmConfig.Provider == model.ProviderOllama {
@@ -436,9 +413,16 @@ func (s *chatService) resolveAttachments(ctx context.Context, convID, userID pri
 			// Selective Ingestion: Large files (>20KB) go to RAG
 			if len(data) > 20*1024 {
 				fmt.Printf("[ChatService] File %s is large (%d bytes), triggering RAG ingestion\n", id, len(data))
-				go func(uID, fID, fName, content string) {
-					collectionName := fmt.Sprintf("user-knowledge-%s", uID)
-					err := s.ragService.Ingest(context.Background(), collectionName, fID, fName, content)
+				go func(uID string, fID, fName, content string) {
+					uObjID, _ := primitive.ObjectIDFromHex(uID)
+					mcpCtx := context.WithValue(context.Background(), mcp.UserIDKey, uObjID)
+					mcpCtx = context.WithValue(mcpCtx, mcp.ConversationIDKey, convID)
+					
+					_, err := s.mcpRegistry.CallTool(mcpCtx, "ingest_document", map[string]interface{}{
+						"file_id":  fID,
+						"filename": fName,
+						"content":  content,
+					})
 					if err != nil {
 						log.Printf("[ChatService] RAG Ingestion failed for %s: %v", fID, err)
 					}

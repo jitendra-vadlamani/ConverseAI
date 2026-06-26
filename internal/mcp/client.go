@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type ContextKey string
@@ -259,9 +260,25 @@ func (c *StdioClient) ListTools(ctx context.Context) ([]Tool, error) {
 }
 
 func (c *StdioClient) CallTool(ctx context.Context, name string, arguments map[string]interface{}) (*CallToolResult, error) {
+	// Inject user and conversation context into arguments for the external process
+	argsCopy := make(map[string]interface{}, len(arguments)+2)
+	for k, v := range arguments {
+		argsCopy[k] = v
+	}
+	if val := ctx.Value(UserIDKey); val != nil {
+		if id, ok := val.(primitive.ObjectID); ok {
+			argsCopy["_user_id"] = id.Hex()
+		}
+	}
+	if val := ctx.Value(ConversationIDKey); val != nil {
+		if id, ok := val.(primitive.ObjectID); ok {
+			argsCopy["_conversation_id"] = id.Hex()
+		}
+	}
+
 	params := CallToolParams{
 		Name:      name,
-		Arguments: arguments,
+		Arguments: argsCopy,
 	}
 
 	var result CallToolResult
