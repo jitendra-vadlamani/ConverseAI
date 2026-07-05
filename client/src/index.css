@@ -182,3 +182,95 @@ input:focus {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* Planning Chat Card */
+.planning-chat-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 450px;
+}
+
+.planning-messages {
+  min-height: 320px;
+  max-height: 400px;
+}
+
+/* Decompose Proposal Items */
+.proposal-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: var(--bg);
+}
+
+.proposal-item:hover {
+  border-color: var(--primary);
+  background: var(--primary-light);
+}
+
+.proposal-item.selected {
+  border-color: var(--primary);
+  background: var(--primary-light);
+}
+
+.proposal-item input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Icon Buttons */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  transition: all 0.15s;
+}
+
+.icon-btn:hover {
+  background: var(--bg-subtle);
+}
+
+.icon-btn.success {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.icon-btn.success:hover {
+  background: #ecfdf5;
+}
+
+.icon-btn.danger {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.icon-btn.danger:hover {
+  background: #fef2f2;
+}
+
+.icon-btn.danger-hover {
+  color: var(--text-muted);
+}
+
+.icon-btn.danger-hover:hover {
+  color: var(--error);
+  border-color: var(--error);
+  background: #fef2f2;
+}

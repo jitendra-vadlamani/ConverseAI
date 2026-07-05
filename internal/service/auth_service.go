@@ -11,7 +11,6 @@ import (
 	"ai-chat/internal/model"
 	"ai-chat/internal/repository"
 	"github.com/golang-jwt/jwt/v5"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -74,7 +73,7 @@ func (s *authService) Login(ctx context.Context, email, password string) (*model
 
 	// Generate JWT
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": user.ID.Hex(),
+		"sub": user.ID,
 		"exp": time.Now().Add(time.Hour * 24).Unix(),
 	})
 
@@ -112,12 +111,9 @@ func (s *authService) VerifyToken(tokenString string) (string, error) {
 }
 
 func (s *authService) GetUserByID(ctx context.Context, id string) (*model.User, error) {
-	objID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return nil, errors.New("invalid user ID")
-	}
-	return s.repo.GetByID(ctx, objID)
+	return s.repo.GetByID(ctx, id)
 }
+
 func (s *authService) UpdatePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
 	user, err := s.GetUserByID(ctx, userID)
 	if err != nil {
@@ -136,6 +132,5 @@ func (s *authService) UpdatePassword(ctx context.Context, userID, oldPassword, n
 	}
 
 	// Update in repo
-	objID, _ := primitive.ObjectIDFromHex(userID)
-	return s.repo.UpdatePassword(ctx, objID, string(hashedPassword))
+	return s.repo.UpdatePassword(ctx, userID, string(hashedPassword))
 }

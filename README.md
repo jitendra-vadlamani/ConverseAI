@@ -1,144 +1,88 @@
-# Chief of Staff AI — Personal Execution Operating System
+# ConverseAI: Knowledge-Graph Topic Explorer
 
-Chief of Staff AI is a personal execution operating system that transforms long-term goals into daily actions, continuously tracks progress, identifies bottlenecks, reprioritizes work, and acts as an intelligent accountability partner.
-
-Unlike standard productivity tools that merely store tasks, Chief of Staff AI manages **outcomes**.
+ConverseAI is a personal execution tool centered on a topic knowledge graph (DSA, System Design, etc.), helping ambitious professionals decompose large study domains into nested sub-topics, map prerequisites, track node-level mastery, and study with an on-demand AI tutor.
 
 ---
 
-## 🎯 Vision & Core Concepts
+## 🎯 Core Design & Concepts
 
-### 📊 Dashboard-Centric Flow
-The core application acts as a personal execution dashboard. Users can easily view and manage their primary focus areas, schedules, action items, and context in a clean, unified space.
+### 🌳 Sidebar Tree (Hierarchy)
+Navigates the main topic hierarchy built via parent-child `part_of` relations. Easily expand or collapse domains (e.g., *Computer Science* &rarr; *Data Structures & Algorithms* &rarr; *Arrays & Strings*).
 
-### 🎯 Goal Workspaces
-Users can define structured **Goals** (e.g., "Become Senior Engineer at Google").
-*   **Task Connections**: Each goal can be connected to specific external or internal tasks or task lists.
-*   **Calendar Integration**: Each goal can be connected to external calendar services.
-*   **Information Gathering**: Based on these connections, the application automatically pulls and synchronizes execution schedules, progress, and relevant constraints.
+### 🕸️ Interactive Local Graph View
+Visualizes local connections (1-2 hops out from the selected node) dynamically using a clean, native SVG interface. Displays:
+*   **`part_of`**: Hierarchy links (parent and sub-topics).
+*   **`prerequisite_of`**: Prerequisite requirements.
+*   **`related_to`**: Side relations.
+Clicking any node in the local graph selects it as the active node.
 
-### 💬 Dual Chat Architecture (Strict Separation)
-ConverseAI provides two separate chat environments to ensure context clarity and avoid cognitive pollution:
-1.  **General Chat**: A general-purpose playground for general productivity planning, queries, and unstructured research.
-2.  **Goal-Specific Chat**: Housed strictly inside each goal's workspace. Conversations here are fully grounded on the specific goal's tasks, progress, calendar events, and memory. General chats and goal-specific chats are kept completely isolated and never merged.
+### 🔒 Prerequisite Locks
+Ensures structured, step-by-step learning. A topic is **locked** if any of its defined prerequisite topics have a mastery score below **70%**. Locked topics hide practice artifacts until prerequisites are met.
+
+### 💬 Scoped AI Tutor
+Each topic node features a dedicated AI tutoring chat. The conversation is fully grounded on the specific topic node, its description, your current mastery level, and custom study notes. 
+
+### 📅 Daily Prioritized Agenda
+Computes your daily study recommendations using a custom **Intelligent Prioritization Score (IPS)**:
+$$\text{IPS} = (100 - \text{MasteryScore}) + \text{DaysSinceLastReviewed}$$
+Uncompleted, unlocked leaf topics with low mastery scores or old review dates are highlighted to maximize learning leverage.
+
+### 📊 Weekly Graph Reviews
+Runs a strategic evaluation of your knowledge graph. Highlights:
+*   Your overall mastery status (nodes $\ge$ 70% score).
+*   Prerequisite bottlenecks blocking subsequent learning paths.
+*   Priority recommendations on what to study next week to unlock the most nodes.
 
 ---
 
-## 🎯 Vision Pillars
+## ⛓️ Technical Architecture
 
-Most ambitious professionals do not fail because of a lack of knowledge. They fail because of:
-*   **Poor Prioritization**: Inability to distinguish high-impact actions from noise.
-*   **Competing Goals**: Attempting to execute too many objectives simultaneously.
-*   **Lack of Accountability**: No objective entity tracking execution rates.
-*   **Inconsistent Execution**: Difficulty in breaking down long-term goals into daily chunks.
-*   **Context Switching & Forgetting**: Losing track of long-term constraints and decisions.
+Unlike the previous multi-user dashboard MVP, the refactored architecture is simplified to a single-user system:
 
-Chief of Staff AI answers a single question every day:
-> **"What is the highest leverage action I should take right now to achieve my goal?"**
+*   **Frontend**: React, Vite, TypeScript, Custom Vanilla CSS
+*   **Backend**: Go (Golang)
+*   **Database**: PostgreSQL (handling adjacency-list schema for recursive graph trees)
+*   **LLM Provider**: Ollama (supports local or remote models like `gemma4:e4b` or `gemma4-cos` with custom context windows)
+*   **Infrastructure**: Dropped MongoDB, MinIO storage, ChromaDB vector databases, and heavy orchestrators for clean execution.
 
 ---
 
-## ⛓️ Product Architecture Flow
+## 🏃‍♂️ Quickstart & Local Development
 
-```text
-North Star Goal
-        ↓
-Goal Decomposition
-        ↓
-Quarterly Objectives
-        ↓
-Monthly Milestones
-        ↓
-Weekly Plans
-        ↓
-Daily Execution
-        ↓
-Feedback Loop (Weekly Review)
-        ↓
-Continuous Reprioritization & Reality Gap Adjustment
+### Prerequisites
+- [Docker & Docker Compose](https://www.docker.com/)
+- [Go 1.22+](https://go.dev/)
+- [Node.js & npm](https://nodejs.org/)
+
+### 1. Start PostgreSQL Database
+```bash
+# Starts the converseai-pg container and applies migration tables automatically
+make infra-up
+```
+
+### 2. Seed Database Graph
+```bash
+# Connects to PostgreSQL and loads the hand-curated baseline graph (DSA + System Design)
+docker exec -i converseai-pg psql -U postgres -d converseai < scripts/seed.sql
+```
+
+### 3. Run Backend Server
+Ensure your `.env` contains your Ollama server endpoint. If you have Ollama running at a remote IP (e.g., `http://192.168.10.106:11434`), configure it in your `.env` or as environment variables:
+```bash
+make dev-server
+```
+
+### 4. Run Frontend Client
+In a new terminal, launch the Vite development server:
+```bash
+make dev-client
 ```
 
 ---
 
-## 🚀 Core Features
+## 🛠️ Makefile Commands
 
-### 1. Goal Decomposition Engine
-Automatically breaks large, vague goals into multi-tiered executable milestones.
-*   *Input Example*: `"Become Senior Engineer at Google"`
-*   *Output Tree*:
-    ```text
-    Senior Engineer
-    ├── Data Structures & Algorithms
-    ├── System Design
-    ├── Distributed Systems
-    ├── Behavioral Interviews
-    ├── Resume & Referrals
-    └── OSS Contributions
-    ```
-
-### 2. Daily Command Center (Prioritized Agenda)
-Surfaces only the highest leverage actions every morning based on impact, strategic alignment, and immediate priorities.
-1.  Solve 2 Graph Problems (Impact: High, Alignment: DSA)
-2.  Study Distributed Transactions (Impact: High, Alignment: System Design)
-3.  Complete OSS Pull Request (Impact: Med, Alignment: Portfolio)
-4.  Reach Out to 2 Referrals (Impact: Med, Alignment: Job Search)
-
-### 3. Intelligent Prioritization Score (IPS)
-Every task receives a dynamic score computed from:
-$$\text{IPS} = f(\text{Impact}, \text{Urgency}, \text{Strategic Alignment}, \text{Dependency Risk}, \text{Effort})$$
-The system continuously reorders outstanding tasks to maximize leverage.
-
-### 4. Progress Intelligence
-Measures actual readiness and competency rather than simple task checkmarks.
-*   *Example (DSA)*: Arrays: 90% | Trees: 80% | Graphs: 50% | DP: 25%
-
-### 5. Long-Term Memory System
-Retains long-term contextual layers:
-*   **Goals**: Target role, target timelines.
-*   **Decisions**: "Selected Temporal for OSS contributions."
-*   **Constraints**: "Preparing for sister's marriage," "Available time: 15 hrs/week."
-*   **Lessons**: "Struggles with Dynamic Programming."
-
-### 6. Killer Feature: Reality Gap Detection
-Measures feasibility by comparing current readiness, target timeline, and available hours:
-*   *Goal*: Google Senior Engineer in 6 Months.
-*   *Analysis*: Current readiness is 40%. Projected readiness is 14 months at 10 hours/week.
-*   *Recommendation*: To hit goal in 6 months, increase weekly study time to 25 hours.
-
-### 7. Learning Engine
-Integrates with custom topics (LeetCode, System Design, Behavioral Stories) using **FSRS-based spaced repetition** to optimize retention.
-
-### 8. Weekly Executive Review
-A weekly collaborative review session with the AI:
-*   **Review**: Plan vs. Actual completions.
-*   **Analysis**: Execution rate, goal alignment, major risks, bottlenecks.
-*   **Outcome**: Automated course corrections and plan for next week.
-
----
-
-## 🛠️ Technical Architecture
-
-### Target System (Production Stack)
-*   **Frontend**: Next.js, Tailwind CSS, ShadCN
-*   **Backend**: FastAPI / Go
-*   **Database**: PostgreSQL + pgvector
-*   **Workflow Engine**: Temporal
-*   **Agent Framework**: LangGraph
-*   **LLM Providers**: OpenAI, Claude
-
-### Current Pivot Implementation (V1 MVP Stack)
-*   **Frontend**: React, Vite, TypeScript, Tailwind CSS / Custom CSS
-*   **Backend**: Go (Golang)
-*   **Database**: MongoDB
-*   **Search**: ChromaDB / Local Vector Search
-*   **Storage**: MinIO
-*   **LLM Provider**: Ollama (Local LLM execution)
-
----
-
-## 📈 MVP Scope Phases
-
-*   **Phase 1 (Active)**: Goal Management, Task Generation, Competency Progress Tracking, Daily Planning, Weekly Reviews.
-*   **Phase 2**: Learning Engine, FSRS Scheduler, Knowledge Tracking.
-*   **Phase 3**: Opportunity Radar, Job Search Automation, OSS Discovery.
-*   **Phase 4**: Multi-Agent Chief of Staff, Autonomous Planning, Full Career Operating System.
+- `make build-all`: Builds the production bundle of the React client and embeds it in the compiled Go server binary (`ai-chat-app`).
+- `make infra-up`: Starts the PostgreSQL container.
+- `make infra-down`: Stops and cleans up the PostgreSQL container.
+- `make clean`: Removes client production dist folders and built Go binaries.

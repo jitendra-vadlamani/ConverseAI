@@ -1,861 +1,1114 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
-import { Target, Calendar, CheckSquare, Square, Brain, ShieldAlert, Award, FileText, Send, ArrowLeft, RefreshCw } from 'lucide-react';
+import { 
+  BookOpen, ChevronRight, ChevronDown, Lock, 
+  Send, RefreshCw, Network, MessageSquare, Award, 
+  HelpCircle, CheckCircle2, AlertTriangle, Play, 
+  Trash2, Pencil, Check, X, Sparkles
+} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-interface Task {
+interface TopicNode {
   id: string;
-  title: string;
+  name: string;
+  level: number;
   description: string;
-  impact: number;
-  urgency: number;
-  effort: number;
-  alignment: number;
-  status: string;
-  completed_at?: string;
+  children: TopicNode[];
 }
 
-interface Competency {
-  area: string;
-  progress_percentage: number;
+interface Progress {
+  topic_id: string;
+  mastery_score: number;
+  last_reviewed?: string;
+  notes: string;
 }
 
-interface MemoryItem {
-  category: string;
-  content: string;
-  created_at: string;
-}
-
-interface Project {
+interface TopicDetail {
   id: string;
-  title: string;
-  target_date: string;
-  status: string;
-  tasks: Task[];
-  competencies: Competency[];
-  memory_items: MemoryItem[];
+  name: string;
+  level: number;
+  description: string;
+  artifact_type?: string;
+  progress?: Progress;
+  prerequisites: any[];
+  locked: boolean;
+}
+
+interface TopicEdge {
+  from_id: string;
+  to_id: string;
+  edge_type: string;
 }
 
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
-  reasoning?: string;
-  created_at?: string;
+}
+
+interface DecomposeProposal {
+  id: string;
+  name: string;
+  description: string;
+  artifact_type: string;
+  prerequisites: string[];
+  selected: boolean;
 }
 
 export const Dashboard: React.FC = () => {
-  const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const [project, setProject] = useState<Project | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'chat' | 'review'>('dashboard');
+  const [tree, setTree] = useState<TopicNode[]>([]);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [nodeDetail, setNodeDetail] = useState<TopicDetail | null>(null);
+  const [relations, setRelations] = useState<TopicEdge[]>([]);
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
+
+  // Full graph states
+  const [fullGraph, setFullGraph] = useState<{ nodes: TopicDetail[]; edges: TopicEdge[] }>({ nodes: [], edges: [] });
+  const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>(() => {
+    try {
+      const stored = localStorage.getItem('converseai_node_positions');
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Save positions when they change
+  useEffect(() => {
+    localStorage.setItem('converseai_node_positions', JSON.stringify(nodePositions));
+  }, [nodePositions]);
   
-  // Reality Gap & Review Reports
-  const [realityReport, setRealityReport] = useState('');
-  const [loadingReality, setLoadingReality] = useState(false);
-  const [reviewReport, setReviewReport] = useState('');
+  // Dashboard states
+  const [dailyAgenda, setDailyAgenda] = useState<TopicDetail[]>([]);
+  const [weeklyReviewReport, setWeeklyReviewReport] = useState<string>('');
   const [loadingReview, setLoadingReview] = useState(false);
 
-  // Memory Addition Form
-  const [memCategory, setMemCategory] = useState('constraint');
-  const [memContent, setMemContent] = useState('');
-  const [addingMemory, setAddingMemory] = useState(false);
+  // Planning chat states
+  const [planMessages, setPlanMessages] = useState<ChatMessage[]>([]);
+  const [planInput, setPlanInput] = useState('');
+  const [planLoading, setPlanLoading] = useState(false);
+  const planEndRef = useRef<HTMLDivElement>(null);
 
-  // Chat Interface State
-  const [conversation, setConversation] = useState<any | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [inputValue, setInputValue] = useState('');
+  // Scoped chat states
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
-  const [models, setModels] = useState<any[]>([]);
-  const [selectedModel, setSelectedModel] = useState('gemma4:e4b');
-  const chatBottomRef = useRef<HTMLDivElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
-  const fetchProject = async () => {
-    try {
-      const response = await fetch(`/api/projects/get?id=${id}`);
-      if (!response.ok) throw new Error('Failed to load project details');
-      const data = await response.json();
-      setProject(data);
-    } catch (err: any) {
-      alert(err.message);
-      navigate('/projects');
-    } finally {
-      setLoading(false);
+  // Progress update states
+  const [masteryInput, setMasteryInput] = useState<number>(0);
+  const [notesInput, setNotesInput] = useState<string>('');
+  const [savingProgress, setSavingProgress] = useState(false);
+
+  // Decompose preview/confirm states
+  const [decomposing, setDecomposing] = useState(false);
+  const [decomposeProposals, setDecomposeProposals] = useState<DecomposeProposal[] | null>(null);
+  const [confirmingDecompose, setConfirmingDecompose] = useState(false);
+
+  // Inline edit states
+  const [editingName, setEditingName] = useState(false);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [editNameValue, setEditNameValue] = useState('');
+  const [editDescValue, setEditDescValue] = useState('');
+
+  // Delete state
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  useEffect(() => {
+    fetchTree();
+    fetchDailyAgenda();
+    fetchFullGraph();
+  }, []);
+
+  useEffect(() => {
+    if (selectedNodeId) {
+      fetchNodeDetail(selectedNodeId);
+      fetchRelations(selectedNodeId);
+      setChatMessages([]);
+      setDecomposeProposals(null);
+      setShowDeleteConfirm(false);
+      setEditingName(false);
+      setEditingDesc(false);
+    } else {
+      setNodeDetail(null);
+      setRelations([]);
+      fetchDailyAgenda();
+      fetchFullGraph();
     }
-  };
+  }, [selectedNodeId]);
 
-  const fetchModels = async () => {
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  useEffect(() => {
+    planEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [planMessages]);
+
+  const fetchTree = async () => {
     try {
-      const res = await fetch('/api/models');
+      const res = await fetch('/api/topics/tree');
       if (res.ok) {
         const data = await res.json();
-        setModels(data);
-        if (data.length > 0) {
-          setSelectedModel(data[0].model_name);
-        }
-      }
-    } catch (err) {}
-  };
-
-  const fetchProjectConversation = async () => {
-    try {
-      // Find standard conversations and locate one belonging to this project
-      const response = await fetch('/api/chat/conversations');
-      if (response.ok) {
-        const conversations = await response.json();
-        const linked = conversations.find((c: any) => c.project_id === id);
-        if (linked) {
-          const detailRes = await fetch(`/api/chat/conversations/get?id=${linked.id}`);
-          if (detailRes.ok) {
-            const detail = await detailRes.json();
-            setConversation(detail);
-            setMessages(detail.messages || []);
-          }
-        }
-      }
-    } catch (err) {}
-  };
-
-  useEffect(() => {
-    fetchProject();
-    fetchModels();
-    fetchProjectConversation();
-  }, [id]);
-
-  useEffect(() => {
-    if (chatBottomRef.current) {
-      chatBottomRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
-
-  if (loading || !project) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '80vh' }}>
-        <span className="animate-spin" style={{ display: 'inline-block', width: '32px', height: '32px', border: '4px solid #6366f1', borderTopColor: 'transparent', borderRadius: '50%' }} />
-      </div>
-    );
-  }
-
-  // Calculate high leverage priorities
-  const activeTasks = project.tasks || [];
-  const priorities = [...activeTasks]
-    .filter(t => t.status === 'pending')
-    .sort((a, b) => {
-      // Dynamic priority score based on impact, urgency, and strategic alignment
-      const scoreA = a.impact * 2 + a.urgency * 1.5 + a.alignment * 1.5 - a.effort * 0.5;
-      const scoreB = b.impact * 2 + b.urgency * 1.5 + b.alignment * 1.5 - b.effort * 0.5;
-      return scoreB - scoreA;
-    });
-
-  const toggleTaskStatus = async (taskID: string) => {
-    const updatedTasks = project.tasks.map(t => {
-      if (t.id === taskID) {
-        return { ...t, status: t.status === 'completed' ? 'pending' : 'completed' };
-      }
-      return t;
-    });
-
-    try {
-      const response = await fetch('/api/projects/tasks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: project.id,
-          tasks: updatedTasks
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setProject(data);
+        const safeData = data || [];
+        setTree(safeData);
+        const expansions: Record<string, boolean> = {};
+        safeData.forEach((node: TopicNode) => {
+          expansions[node.id] = true;
+        });
+        setExpandedNodes(expansions);
       }
     } catch (err) {
-      alert('Failed to update task status');
+      console.error('Error fetching tree:', err);
     }
   };
 
-  const handleSliderChange = (idx: number, val: number) => {
-    if (!project) return;
-    const updated = [...project.competencies];
-    updated[idx].progress_percentage = val;
-    setProject({ ...project, competencies: updated });
-  };
-
-  const saveCompetencies = async () => {
-    if (!project) return;
+  const fetchDailyAgenda = async () => {
     try {
-      const response = await fetch('/api/projects/competencies', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: project.id,
-          competencies: project.competencies
-        }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setProject(data);
-        alert('Competency progress saved successfully!');
+      const res = await fetch('/api/agenda/today');
+      if (res.ok) {
+        const data = await res.json();
+        setDailyAgenda(data || []);
       }
     } catch (err) {
-      alert('Failed to save competencies');
+      console.error('Error fetching agenda:', err);
     }
   };
 
-  const handleAddMemory = async (e: React.FormEvent) => {
+  const fetchFullGraph = async () => {
+    try {
+      const res = await fetch('/api/topics/all_graph');
+      if (res.ok) {
+        const data = await res.json();
+        setFullGraph(data || { nodes: [], edges: [] });
+      }
+    } catch (err) {
+      console.error('Error fetching full graph:', err);
+    }
+  };
+
+  // Position calculation effect
+  useEffect(() => {
+    if (!fullGraph.nodes || fullGraph.nodes.length === 0) return;
+
+    let changed = false;
+    const updated = { ...nodePositions };
+
+    // Sort nodes by level so parents are processed before children
+    const sortedNodes = [...fullGraph.nodes].sort((a, b) => (a.level || 1) - (b.level || 1));
+
+    sortedNodes.forEach((node) => {
+      if (!updated[node.id]) {
+        changed = true;
+        // Find if this node has a parent
+        const parentEdge = fullGraph.edges.find(e => e.edge_type === 'part_of' && e.from_id === node.id);
+        if (parentEdge && updated[parentEdge.to_id]) {
+          const parentPos = updated[parentEdge.to_id];
+          // Place below parent with a small random jitter to avoid exact overlap
+          const jitter = (Math.random() - 0.5) * 60;
+          updated[node.id] = {
+            x: parentPos.x + jitter,
+            y: parentPos.y + 120
+          };
+        } else {
+          // If no parent pos is resolved yet, layout by level rows
+          const level = node.level || 1;
+          const levelNodes = fullGraph.nodes.filter(n => (n.level || 1) === level);
+          const index = levelNodes.findIndex(n => n.id === node.id);
+          const siblingCount = levelNodes.length;
+
+          const width = 800;
+          const x = siblingCount > 1 
+            ? 100 + (index / (siblingCount - 1)) * (width - 200) 
+            : width / 2;
+          const y = 60 + (level - 1) * 120;
+
+          updated[node.id] = { x, y };
+        }
+      }
+    });
+
+    if (changed) {
+      setNodePositions(updated);
+    }
+  }, [fullGraph]);
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!draggingNodeId || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    
+    // Adjust mouse coordinate to SVG coordinate system (viewBox is 0 0 800 500)
+    const x = ((e.clientX - rect.left) / rect.width) * 800;
+    const y = ((e.clientY - rect.top) / rect.height) * 500;
+    
+    setNodePositions(prev => ({
+      ...prev,
+      [draggingNodeId]: {
+        x: Math.max(25, Math.min(775, x)),
+        y: Math.max(25, Math.min(475, y))
+      }
+    }));
+  };
+
+  const handleMouseUp = () => {
+    setDraggingNodeId(null);
+  };
+
+  const handleNodeMouseDown = (nodeId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDraggingNodeId(nodeId);
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+  };
+
+  const handleNodeMouseUp = (nodeId: string, e: React.MouseEvent) => {
+    if (dragStartRef.current) {
+      const dx = e.clientX - dragStartRef.current.x;
+      const dy = e.clientY - dragStartRef.current.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 5) {
+        // It was a click, not a drag! Select the node.
+        setSelectedNodeId(nodeId);
+      }
+    }
+    dragStartRef.current = null;
+    setDraggingNodeId(null);
+  };
+
+  const fetchNodeDetail = async (id: string) => {
+    try {
+      const res = await fetch(`/api/topics/get?id=${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setNodeDetail(data);
+        setMasteryInput(data.progress?.mastery_score || 0);
+        setNotesInput(data.progress?.notes || '');
+      }
+    } catch (err) {
+      console.error('Error fetching node detail:', err);
+    }
+  };
+
+  const fetchRelations = async (id: string) => {
+    try {
+      const res = await fetch(`/api/topics/relations?id=${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setRelations(data || []);
+      }
+    } catch (err) {
+      console.error('Error fetching relations:', err);
+    }
+  };
+
+  // --- Planning Chat ---
+  const handlePlanSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!memContent) return;
+    if (!planInput.trim() || planLoading) return;
 
-    setAddingMemory(true);
+    const userMsg: ChatMessage = { role: 'user', content: planInput.trim() };
+    const newMessages = [...planMessages, userMsg];
+    setPlanMessages(newMessages);
+    setPlanInput('');
+    setPlanLoading(true);
+
     try {
-      const response = await fetch('/api/projects/memory', {
+      const res = await fetch('/api/topics/plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: newMessages }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPlanMessages([...newMessages, { role: 'assistant', content: data.response }]);
+        if (data.graph_updated) {
+          fetchTree();
+          fetchDailyAgenda();
+          fetchFullGraph();
+        }
+      }
+    } catch (err) {
+      console.error('Planning chat error:', err);
+    } finally {
+      setPlanLoading(false);
+    }
+  };
+
+  // --- Decompose Preview/Confirm ---
+  const handleDecomposePreview = async () => {
+    if (!selectedNodeId) return;
+    setDecomposing(true);
+    setDecomposeProposals(null);
+    try {
+      const res = await fetch(`/api/topics/decompose/preview?id=${selectedNodeId}`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        const proposals = (data.sub_topics || []).map((st: any) => ({ ...st, selected: true }));
+        setDecomposeProposals(proposals);
+      }
+    } catch (err) {
+      console.error('Decompose preview error:', err);
+    } finally {
+      setDecomposing(false);
+    }
+  };
+
+  const toggleProposal = (idx: number) => {
+    if (!decomposeProposals) return;
+    const updated = [...decomposeProposals];
+    updated[idx] = { ...updated[idx], selected: !updated[idx].selected };
+    setDecomposeProposals(updated);
+  };
+
+  const handleDecomposeConfirm = async () => {
+    if (!selectedNodeId || !decomposeProposals) return;
+    const selected = decomposeProposals.filter(p => p.selected);
+    if (selected.length === 0) {
+      setDecomposeProposals(null);
+      return;
+    }
+    setConfirmingDecompose(true);
+    try {
+      const res = await fetch('/api/topics/decompose/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          project_id: project.id,
-          category: memCategory,
-          content: memContent
+          parent_id: selectedNodeId,
+          sub_topics: selected.map(({ selected: _, ...rest }) => rest),
         }),
       });
-
-      if (response.ok) {
-        const data = await response.json();
-        setProject(data);
-        setMemContent('');
+      if (res.ok) {
+        setDecomposeProposals(null);
+        fetchTree();
+        fetchNodeDetail(selectedNodeId);
+        fetchRelations(selectedNodeId);
+        fetchFullGraph();
       }
     } catch (err) {
-      alert('Failed to save memory item');
+      console.error('Decompose confirm error:', err);
     } finally {
-      setAddingMemory(false);
+      setConfirmingDecompose(false);
     }
   };
 
-  const triggerRealityReport = async () => {
-    setLoadingReality(true);
-    setRealityReport('');
+  // --- Scoped Chat ---
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim() || !selectedNodeId || chatLoading) return;
+
+    const userMsg: ChatMessage = { role: 'user', content: chatInput.trim() };
+    const newMessages = [...chatMessages, userMsg];
+    setChatMessages(newMessages);
+    setChatInput('');
+    setChatLoading(true);
+
     try {
-      const res = await fetch(`/api/projects/reality-gap?id=${project.id}`);
+      const res = await fetch(`/api/topics/chat?id=${selectedNodeId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: newMessages }),
+      });
       if (res.ok) {
         const data = await res.json();
-        setRealityReport(data.report);
-      } else {
-        setRealityReport('Error calling Reality Gap analysis. Ensure your Ollama models are running.');
+        setChatMessages([...newMessages, { role: 'assistant', content: data.response }]);
       }
     } catch (err) {
-      setRealityReport('Request failed: ' + err);
+      console.error('Chat error:', err);
     } finally {
-      setLoadingReality(false);
+      setChatLoading(false);
     }
   };
 
-  const triggerWeeklyReviewReport = async () => {
+  // --- Progress ---
+  const handleSaveProgress = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedNodeId) return;
+    setSavingProgress(true);
+    try {
+      await fetch('/api/topics/progress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic_id: selectedNodeId, mastery_score: masteryInput, notes: notesInput }),
+      });
+      fetchNodeDetail(selectedNodeId);
+      fetchDailyAgenda();
+      fetchFullGraph();
+    } catch (err) {
+      console.error('Save progress error:', err);
+    } finally {
+      setSavingProgress(false);
+    }
+  };
+
+  // --- Inline Edit ---
+  const startEditName = () => {
+    if (!nodeDetail) return;
+    setEditNameValue(nodeDetail.name);
+    setEditingName(true);
+  };
+
+  const saveEditName = async () => {
+    if (!nodeDetail) return;
+    try {
+      await fetch('/api/topics/edit', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: nodeDetail.id, name: editNameValue, description: nodeDetail.description }),
+      });
+      fetchNodeDetail(nodeDetail.id);
+      fetchTree();
+      fetchFullGraph();
+    } finally {
+      setEditingName(false);
+    }
+  };
+
+  const startEditDesc = () => {
+    if (!nodeDetail) return;
+    setEditDescValue(nodeDetail.description);
+    setEditingDesc(true);
+  };
+
+  const saveEditDesc = async () => {
+    if (!nodeDetail) return;
+    try {
+      await fetch('/api/topics/edit', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: nodeDetail.id, name: nodeDetail.name, description: editDescValue }),
+      });
+      fetchNodeDetail(nodeDetail.id);
+      fetchFullGraph();
+    } finally {
+      setEditingDesc(false);
+    }
+  };
+
+  // --- Delete ---
+  const handleDeleteTopic = async () => {
+    if (!selectedNodeId) return;
+    try {
+      const res = await fetch(`/api/topics/delete?id=${selectedNodeId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setSelectedNodeId(null);
+        setShowDeleteConfirm(false);
+        fetchTree();
+        fetchFullGraph();
+      }
+    } catch (err) {
+      console.error('Delete error:', err);
+    }
+  };
+
+  // --- Weekly Review ---
+  const runWeeklyReview = async () => {
     setLoadingReview(true);
-    setReviewReport('');
     try {
-      const res = await fetch(`/api/projects/weekly-review?id=${project.id}`);
+      const res = await fetch('/api/review/weekly', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        setReviewReport(data.report);
-      } else {
-        setReviewReport('Error generating executive review. Ensure your Ollama models are running.');
+        setWeeklyReviewReport(data.report);
       }
     } catch (err) {
-      setReviewReport('Request failed: ' + err);
+      console.error('Weekly review error:', err);
     } finally {
       setLoadingReview(false);
     }
   };
 
-  const initializeChat = async () => {
-    setChatLoading(true);
-    try {
-      const res = await fetch('/api/chat/conversations/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: `CoS: ${project.title}`,
-          project_id: project.id
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setConversation(data);
-        setMessages([]);
-      }
-    } catch (err) {
-      alert('Failed to initialize chat');
-    } finally {
-      setChatLoading(false);
-    }
+  const toggleExpand = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedNodes(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputValue || !conversation) return;
+  // --- SVG Graph ---
+  const renderTotalGraph = () => {
+    if (!fullGraph.nodes || fullGraph.nodes.length === 0) {
+      return (
+        <div style={{ padding: '3rem 1rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+          <Sparkles size={32} style={{ margin: '0 auto 0.75rem', opacity: 0.5 }} />
+          <p>No topics to display in the graph yet.</p>
+        </div>
+      );
+    }
 
-    const userPrompt = inputValue;
-    setInputValue('');
-    setChatLoading(true);
+    const lines: React.ReactNode[] = [];
+    fullGraph.edges.forEach((edge, idx) => {
+      const sourcePos = nodePositions[edge.from_id];
+      const targetPos = nodePositions[edge.to_id];
+      if (sourcePos && targetPos) {
+        const dx = targetPos.x - sourcePos.x;
+        const dy = targetPos.y - sourcePos.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        if (dist > 44) {
+          const r = 22;
+          const x1 = sourcePos.x + (dx / dist) * r;
+          const y1 = sourcePos.y + (dy / dist) * r;
+          const x2 = targetPos.x - (dx / dist) * r;
+          const y2 = targetPos.y - (dy / dist) * r;
 
-    const newUserMsg: ChatMessage = {
-      role: 'user',
-      content: userPrompt
-    };
-    setMessages(prev => [...prev, newUserMsg]);
-
-    const assistantMsg: ChatMessage = {
-      role: 'assistant',
-      content: '',
-      reasoning: ''
-    };
-    setMessages(prev => [...prev, assistantMsg]);
-
-    try {
-      const response = await fetch('/api/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversation_id: conversation.id,
-          model_name: selectedModel,
-          content: userPrompt
-        })
-      });
-
-      if (!response.ok) throw new Error('Stream request failed');
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('ReadableStream not supported');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let isThinking = false;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        let currentEvent = 'message';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-
-          if (trimmed.startsWith('event: ')) {
-            currentEvent = trimmed.substring(7);
-            continue;
-          }
-
-          if (trimmed.startsWith('data: ')) {
-            const data = trimmed.substring(6);
-            if (data === '[DONE]') {
-              setChatLoading(false);
-              return;
-            }
-
-            if (currentEvent === 'thought') {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                last.reasoning = (last.reasoning || '') + data;
-                return copy;
-              });
-            } else if (currentEvent === 'error') {
-              setMessages(prev => {
-                const copy = [...prev];
-                copy[copy.length - 1].content = `[Stream Error: ${data}]`;
-                return copy;
-              });
-              setChatLoading(false);
-              return;
-            } else {
-              setMessages(prev => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                last.content = (last.content || '') + data;
-                return copy;
-              });
-            }
-            if (currentEvent !== 'message') currentEvent = 'message';
-          }
+          const isPartOf = edge.edge_type === 'part_of';
+          lines.push(
+            <line
+              key={`edge-${idx}`}
+              x1={x1}
+              y1={y1}
+              x2={x2}
+              y2={y2}
+              stroke={isPartOf ? '#cbd5e1' : '#64748b'}
+              strokeWidth={2}
+              strokeDasharray={isPartOf ? '5 5' : undefined}
+              markerEnd={isPartOf ? undefined : 'url(#arrow-main)'}
+            />
+          );
         }
       }
-    } catch (err: any) {
-      setMessages(prev => {
-        const copy = [...prev];
-        copy[copy.length - 1].content = `[Connection Error: ${err.message}]`;
-        return copy;
-      });
-      setChatLoading(false);
+    });
+
+    return (
+      <svg
+        ref={svgRef}
+        className="svg-graph-container"
+        viewBox="0 0 800 500"
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        style={{
+          width: '100%',
+          height: '500px',
+          border: '1px solid var(--border)',
+          borderRadius: '1rem',
+          backgroundColor: '#f8fafc',
+          userSelect: 'none',
+        }}
+      >
+        <defs>
+          <marker
+            id="arrow-main"
+            viewBox="0 0 10 10"
+            refX="6"
+            refY="5"
+            markerWidth="6"
+            markerHeight="6"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#64748b" />
+          </marker>
+        </defs>
+
+        {/* Lines */}
+        {lines}
+
+        {/* Nodes */}
+        {fullGraph.nodes.map((node) => {
+          const pos = nodePositions[node.id];
+          if (!pos) return null;
+
+          const mastery = node.progress?.mastery_score || 0;
+          const isLocked = node.locked;
+          
+          let circleFill = '#f1f5f9';
+          let circleStroke = '#94a3b8';
+          let textColor = '#475569';
+
+          if (isLocked) {
+            circleFill = '#f8fafc';
+            circleStroke = '#cbd5e1';
+          } else if (mastery >= 70) {
+            circleFill = '#d1fae5';
+            circleStroke = '#10b981';
+            textColor = '#065f46';
+          } else if (mastery > 0) {
+            circleFill = '#fef3c7';
+            circleStroke = '#f59e0b';
+            textColor = '#92400e';
+          }
+
+          return (
+            <g
+              key={node.id}
+              transform={`translate(${pos.x}, ${pos.y})`}
+              onMouseDown={(e) => handleNodeMouseDown(node.id, e)}
+              onMouseUp={(e) => handleNodeMouseUp(node.id, e)}
+              style={{ cursor: draggingNodeId === node.id ? 'grabbing' : 'grab' }}
+            >
+              {/* Background Glow if active */}
+              {selectedNodeId === node.id && (
+                <circle r={28} fill="none" stroke="var(--primary)" strokeWidth={2} strokeDasharray="3 3" />
+              )}
+              
+              {/* Main Node Circle */}
+              <circle
+                r={22}
+                fill={circleFill}
+                stroke={circleStroke}
+                strokeWidth={2.5}
+                style={{
+                  transition: draggingNodeId === node.id ? 'none' : 'transform 0.1s ease',
+                  filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.05))',
+                }}
+              />
+
+              {/* Locked Padlock or Mastery Score */}
+              {isLocked ? (
+                <g transform="translate(0, 0)">
+                  <rect x="-5" y="-1" width="10" height="7" rx="1" fill="#cbd5e1" />
+                  <path d="M -3.5 -1 V -3 A 3.5 3.5 0 0 1 3.5 -1 V -1" fill="none" stroke="#cbd5e1" strokeWidth="1.2" />
+                </g>
+              ) : (
+                <text
+                  textAnchor="middle"
+                  dy="3.5px"
+                  fontSize="10px"
+                  fontWeight="700"
+                  fill={textColor}
+                >
+                  {mastery}%
+                </text>
+              )}
+
+              {/* Node Label Card/Pill Background */}
+              <rect
+                x={-Math.min(node.name.length * 3.5 + 8, 80)}
+                y={28}
+                width={Math.min(node.name.length * 7 + 16, 160)}
+                height={18}
+                rx={4}
+                fill="white"
+                stroke={selectedNodeId === node.id ? 'var(--primary)' : 'var(--border)'}
+                strokeWidth={selectedNodeId === node.id ? 1.5 : 1}
+                style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.05))' }}
+              />
+
+              {/* Node Label Text */}
+              <text
+                y={40}
+                textAnchor="middle"
+                fontSize="10px"
+                fontWeight="600"
+                fill="#1e293b"
+              >
+                {node.name.length > 20 ? node.name.slice(0, 18) + '...' : node.name}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    );
+  };
+
+  const renderLocalGraph = () => {
+    if (!selectedNodeId || !nodeDetail) return null;
+
+    const centerX = 200;
+    const centerY = 175;
+    
+    const parents = relations.filter(r => r.edge_type === 'part_of' && r.from_id === selectedNodeId);
+    const children = relations.filter(r => r.edge_type === 'part_of' && r.to_id === selectedNodeId);
+    const prereqs = relations.filter(r => r.edge_type === 'prerequisite_of' && r.to_id === selectedNodeId);
+    const dependencies = relations.filter(r => r.edge_type === 'prerequisite_of' && r.from_id === selectedNodeId);
+
+    const nodes: { id: string; label: string; x: number; y: number; role: string }[] = [
+      { id: selectedNodeId, label: nodeDetail.name, x: centerX, y: centerY, role: 'center' }
+    ];
+    const lines: { x1: number; y1: number; x2: number; y2: number; type: string }[] = [];
+
+    if (parents.length > 0) {
+      nodes.push({ id: parents[0].to_id, label: 'Parent', x: centerX, y: 50, role: 'parent' });
+      lines.push({ x1: centerX, y1: centerY, x2: centerX, y2: 50, type: 'part_of' });
     }
+
+    children.forEach((child, i) => {
+      const x = 100 + i * 100;
+      nodes.push({ id: child.from_id, label: child.from_id.replace('t_', ''), x, y: 300, role: 'child' });
+      lines.push({ x1: centerX, y1: centerY, x2: x, y2: 300, type: 'part_of' });
+    });
+
+    prereqs.forEach((prereq, i) => {
+      nodes.push({ id: prereq.from_id, label: prereq.from_id.replace('t_', ''), x: 50, y: 100 + i * 75, role: 'prereq' });
+      lines.push({ x1: 50, y1: 100 + i * 75, x2: centerX, y2: centerY, type: 'prereq' });
+    });
+
+    dependencies.forEach((dep, i) => {
+      nodes.push({ id: dep.to_id, label: dep.to_id.replace('t_', ''), x: 350, y: 100 + i * 75, role: 'dependency' });
+      lines.push({ x1: centerX, y1: centerY, x2: 350, y2: 100 + i * 75, type: 'prereq' });
+    });
+
+    return (
+      <svg className="svg-graph-container" viewBox="0 0 400 350">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="15" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
+          </marker>
+        </defs>
+        {lines.map((l, i) => (
+          <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
+            stroke={l.type === 'part_of' ? '#cbd5e1' : '#64748b'} strokeWidth={2}
+            strokeDasharray={l.type === 'part_of' ? '4 4' : 'none'}
+            markerEnd={l.type === 'prereq' ? 'url(#arrow)' : undefined} />
+        ))}
+        {nodes.map(n => {
+          const isCenter = n.role === 'center';
+          return (
+            <g key={n.id} transform={`translate(${n.x}, ${n.y})`}
+              onClick={() => n.id !== selectedNodeId && setSelectedNodeId(n.id)}
+              style={{ cursor: n.id !== selectedNodeId ? 'pointer' : 'default' }}>
+              <circle r={isCenter ? 24 : 18} fill={isCenter ? '#6366f1' : '#ffffff'}
+                stroke={isCenter ? '#4f46e5' : '#cbd5e1'} strokeWidth={2} />
+              <text y={isCenter ? 38 : 30} textAnchor="middle"
+                fontSize={isCenter ? '10px' : '9px'} fontWeight={isCenter ? 'bold' : 'normal'} fill="#1e293b">
+                {n.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    );
+  };
+
+  const renderSidebarNode = (node: TopicNode) => {
+    const isExpanded = !!expandedNodes[node.id];
+    const hasChildren = node.children && node.children.length > 0;
+    const isActive = selectedNodeId === node.id;
+
+    return (
+      <div key={node.id} className="tree-node-wrapper">
+        <div className={`tree-node-item ${isActive ? 'active' : ''}`} onClick={() => setSelectedNodeId(node.id)}>
+          {hasChildren ? (
+            <span onClick={(e) => toggleExpand(node.id, e)}>
+              {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            </span>
+          ) : (
+            <BookOpen size={16} />
+          )}
+          <span style={{ flex: 1, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+            {node.name}
+          </span>
+        </div>
+        {hasChildren && isExpanded && (
+          <div className="tree-node">
+            {node.children.map(child => renderSidebarNode(child))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
-    <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr', height: '100%', overflow: 'hidden' }}>
-      
-      {/* Workspace Header */}
-      <div style={{ padding: '1.25rem 2rem', background: 'white', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <Link to="/projects" style={{ color: '#64748b', display: 'flex', alignItems: 'center' }}>
-            <ArrowLeft size={20} />
-          </Link>
+    <div className="explorer-layout">
+      {/* LEFT COLUMN: Sidebar Navigation */}
+      <aside className="explorer-sidebar">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a' }}>Topic Explorer</h2>
+          {selectedNodeId && (
+            <button onClick={() => setSelectedNodeId(null)}
+              style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: '0.8rem', cursor: 'pointer', fontWeight: 600 }}>
+              Dashboard
+            </button>
+          )}
+        </div>
+        <div className="tree-container">
+          {tree.length === 0 ? (
+            <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+              <Sparkles size={24} style={{ margin: '0 auto 0.75rem', opacity: 0.5 }} />
+              <p>No topics yet. Use the planning chat to tell us what you want to learn!</p>
+            </div>
+          ) : (
+            tree.map(node => renderSidebarNode(node))
+          )}
+        </div>
+      </aside>
+
+      {/* RIGHT COLUMN */}
+      <main className="explorer-content">
+        {nodeDetail ? (
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#6366f1', fontSize: '0.8rem', fontWeight: 700, textTransform: 'uppercase' }}>
-              <Target size={14} /> Goal Workspace
-            </div>
-            <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#0f172a' }}>{project.title}</h2>
-          </div>
-        </div>
-
-        {/* Tab Selector */}
-        <div style={{ display: 'flex', background: '#f1f5f9', padding: '0.25rem', borderRadius: '0.75rem', gap: '0.125rem' }}>
-          <button
-            onClick={() => setActiveTab('dashboard')}
-            style={{
-              padding: '0.5rem 1.25rem',
-              borderRadius: '0.5rem',
-              border: 'none',
-              fontWeight: 600,
-              fontSize: '0.875rem',
-              cursor: 'pointer',
-              background: activeTab === 'dashboard' ? 'white' : 'transparent',
-              color: activeTab === 'dashboard' ? '#1e293b' : '#64748b',
-              boxShadow: activeTab === 'dashboard' ? '0 1px 3px 0 rgba(0, 0, 0, 0.05)' : 'none',
-              transition: 'all 0.2s'
-            }}
-          >
-            Dashboard
-          </button>
-          <button
-            onClick={() => setActiveTab('chat')}
-            style={{
-              padding: '0.5rem 1.25rem',
-              borderRadius: '0.5rem',
-              border: 'none',
-              fontWeight: 600,
-              fontSize: '0.875rem',
-              cursor: 'pointer',
-              background: activeTab === 'chat' ? 'white' : 'transparent',
-              color: activeTab === 'chat' ? '#1e293b' : '#64748b',
-              boxShadow: activeTab === 'chat' ? '0 1px 3px 0 rgba(0, 0, 0, 0.05)' : 'none',
-              transition: 'all 0.2s'
-            }}
-          >
-            Accountability Chat
-          </button>
-          <button
-            onClick={() => setActiveTab('review')}
-            style={{
-              padding: '0.5rem 1.25rem',
-              borderRadius: '0.5rem',
-              border: 'none',
-              fontWeight: 600,
-              fontSize: '0.875rem',
-              cursor: 'pointer',
-              background: activeTab === 'review' ? 'white' : 'transparent',
-              color: activeTab === 'review' ? '#1e293b' : '#64748b',
-              boxShadow: activeTab === 'review' ? '0 1px 3px 0 rgba(0, 0, 0, 0.05)' : 'none',
-              transition: 'all 0.2s'
-            }}
-          >
-            Weekly Review
-          </button>
-        </div>
-      </div>
-
-      {/* Main Panel Content */}
-      <div style={{ overflowY: 'auto', background: '#f8fafc' }}>
-        
-        {/* TAB 1: DASHBOARD */}
-        {activeTab === 'dashboard' && (
-          <div style={{ maxWidth: '1200px', margin: '2rem auto', padding: '0 2rem 4rem', display: 'grid', gridTemplateColumns: '1fr 380px', gap: '2rem' }}>
-            
-            {/* Left Column: Priorities & Decomposition */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-              
-              {/* Daily Priorities */}
-              <div style={{ background: 'white', borderRadius: '1.25rem', padding: '1.75rem', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px 0 rgba(0,0,0,0.02)' }}>
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 750, color: '#0f172a', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Award size={18} style={{ color: '#f59e0b' }} /> Daily Priorities Center
-                </h3>
-                
-                {priorities.length === 0 ? (
-                  <p style={{ color: '#64748b', fontSize: '0.9rem' }}>All milestones completed! Create new tasks below.</p>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                    {priorities.slice(0, 4).map((task) => (
-                      <div
-                        key={task.id}
-                        onClick={() => toggleTaskStatus(task.id)}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'flex-start',
-                          gap: '0.75rem',
-                          padding: '0.85rem',
-                          background: '#f8fafc',
-                          border: '1px solid #f1f5f9',
-                          borderRadius: '0.75rem',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s'
-                        }}
-                        onMouseOver={(e) => e.currentTarget.style.borderColor = '#cbd5e1'}
-                        onMouseOut={(e) => e.currentTarget.style.borderColor = '#f1f5f9'}
-                      >
-                        <div style={{ color: '#6366f1', marginTop: '0.1rem' }}>
-                          <Square size={18} />
-                        </div>
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: '0.95rem', color: '#1e293b' }}>{task.title}</div>
-                          <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.125rem' }}>{task.description}</div>
-                          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem' }}>
-                            <span style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderRadius: '0.25rem', background: '#e0f2fe', color: '#0369a1', fontWeight: 600 }}>Impact: {task.impact}/10</span>
-                            <span style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderRadius: '0.25rem', background: '#fee2e2', color: '#991b1b', fontWeight: 600 }}>Urgency: {task.urgency}/10</span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Goal Decomposition Tree */}
-              <div style={{ background: 'white', borderRadius: '1.25rem', padding: '1.75rem', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px 0 rgba(0,0,0,0.02)' }}>
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 750, color: '#0f172a', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Target size={18} style={{ color: '#6366f1' }} /> Milestone Decomposition Tree
-                </h3>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  {activeTasks.map((task) => {
-                    const isCompleted = task.status === 'completed';
-                    return (
-                      <div
-                        key={task.id}
-                        onClick={() => toggleTaskStatus(task.id)}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'flex-start',
-                          gap: '0.75rem',
-                          padding: '1rem',
-                          border: '1px solid #e2e8f0',
-                          borderRadius: '0.75rem',
-                          cursor: 'pointer',
-                          background: isCompleted ? '#faf5ff' : 'white',
-                          opacity: isCompleted ? 0.75 : 1,
-                          transition: 'all 0.2s'
-                        }}
-                      >
-                        <div style={{ color: isCompleted ? '#a855f7' : '#94a3b8', marginTop: '0.1rem' }}>
-                          {isCompleted ? <CheckSquare size={18} /> : <Square size={18} />}
-                        </div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 600, fontSize: '0.95rem', color: '#1e293b', textDecoration: isCompleted ? 'line-through' : 'none' }}>
-                            {task.title}
-                          </div>
-                          <div style={{ fontSize: '0.825rem', color: '#64748b', marginTop: '0.25rem' }}>
-                            {task.description}
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', alignItems: 'flex-end', fontSize: '0.75rem', fontWeight: 600, color: '#64748b' }}>
-                          <span>Impact: {task.impact}</span>
-                          <span>Effort: {task.effort}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            {/* Right Column: Competencies & Memory Constraints */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-              
-              {/* Competency Slider progress */}
-              <div style={{ background: 'white', borderRadius: '1.25rem', padding: '1.75rem', border: '1px solid #e2e8f0' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-                  <h3 style={{ fontSize: '1rem', fontWeight: 750, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Award size={18} style={{ color: '#10b981' }} /> Progress Intelligence
-                  </h3>
-                  <button
-                    onClick={saveCompetencies}
-                    style={{ background: 'transparent', border: 'none', color: '#6366f1', fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer' }}
-                  >
-                    Save Changes
-                  </button>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                  {project.competencies && project.competencies.map((comp, idx) => (
-                    <div key={idx}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.825rem', fontWeight: 600, color: '#475569', marginBottom: '0.375rem' }}>
-                        <span>{comp.area}</span>
-                        <span>{comp.progress_percentage}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={comp.progress_percentage}
-                        onChange={(e) => handleSliderChange(idx, parseInt(e.target.value))}
-                        style={{ width: '100%', height: '4px', background: '#e2e8f0', borderRadius: '2px', cursor: 'pointer' }}
-                      />
+            {/* Header with inline edit + delete */}
+            <div className="node-header">
+              <div className="node-title-row">
+                <div style={{ flex: 1 }}>
+                  {editingName ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <input type="text" value={editNameValue} onChange={e => setEditNameValue(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && saveEditName()}
+                        style={{ fontSize: '1.5rem', fontWeight: 700, border: '1px solid var(--primary)', borderRadius: '0.5rem', padding: '0.25rem 0.5rem', width: '100%' }}
+                        autoFocus />
+                      <button onClick={saveEditName} className="icon-btn success"><Check size={18} /></button>
+                      <button onClick={() => setEditingName(false)} className="icon-btn"><X size={18} /></button>
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Reality Gap Detector Widget */}
-              <div style={{ background: 'linear-gradient(135deg, #1e1b4b, #311042)', color: 'white', borderRadius: '1.25rem', padding: '1.75rem' }}>
-                <h3 style={{ fontSize: '1rem', fontWeight: 750, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <ShieldAlert size={18} style={{ color: '#f43f5e' }} /> Reality Gap Detection
-                </h3>
-                <p style={{ fontSize: '0.8rem', color: '#c7d2fe', marginBottom: '1.25rem', lineHeight: 1.4 }}>
-                  Compare target date readiness against competency curves and time allocations.
-                </p>
-
-                <button
-                  onClick={triggerRealityReport}
-                  disabled={loadingReality}
-                  style={{
-                    background: '#f43f5e',
-                    color: 'white',
-                    border: 'none',
-                    padding: '0.6rem 1rem',
-                    borderRadius: '0.5rem',
-                    fontWeight: 600,
-                    fontSize: '0.85rem',
-                    cursor: 'pointer',
-                    width: '100%',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '0.5rem'
-                  }}
-                >
-                  {loadingReality ? (
-                    <>
-                      <RefreshCw size={14} className="animate-spin" /> Analyzing Readiness...
-                    </>
                   ) : (
-                    'Audit Goal Feasibility'
+                    <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#0f172a', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                      onClick={startEditName}>
+                      {nodeDetail.name}
+                      <Pencil size={14} style={{ color: 'var(--text-muted)', opacity: 0.4 }} />
+                    </h1>
                   )}
-                </button>
-
-                {realityReport && (
-                  <div style={{ marginTop: '1.25rem', background: 'rgba(255, 255, 255, 0.08)', borderRadius: '0.75rem', padding: '1rem', fontSize: '0.825rem', border: '1px solid rgba(255,255,255,0.1)', overflowY: 'auto', maxHeight: '250px', color: '#e0e7ff' }}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{realityReport}</ReactMarkdown>
-                  </div>
-                )}
-              </div>
-
-              {/* Long Term Memory Logger */}
-              <div style={{ background: 'white', borderRadius: '1.25rem', padding: '1.75rem', border: '1px solid #e2e8f0' }}>
-                <h3 style={{ fontSize: '1rem', fontWeight: 750, color: '#0f172a', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Brain size={18} style={{ color: '#a855f7' }} /> Long-Term Memory (Decisions & Constraints)
-                </h3>
-
-                <form onSubmit={handleAddMemory} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
-                  <select
-                    value={memCategory}
-                    onChange={(e) => setMemCategory(e.target.value)}
-                    style={{ padding: '0.4rem', border: '1px solid #e2e8f0', borderRadius: '0.5rem', outline: 'none', fontSize: '0.8rem', background: '#f8fafc' }}
-                  >
-                    <option value="constraint">Constraint</option>
-                    <option value="decision">Decision</option>
-                    <option value="lesson">Lesson</option>
-                  </select>
-                  <input
-                    type="text"
-                    placeholder="Log constraint..."
-                    value={memContent}
-                    onChange={(e) => setMemContent(e.target.value)}
-                    style={{ flex: 1, padding: '0.4rem 0.75rem', border: '1px solid #e2e8f0', borderRadius: '0.5rem', outline: 'none', fontSize: '0.8rem' }}
-                  />
-                  <button
-                    type="submit"
-                    disabled={addingMemory || !memContent}
-                    style={{ background: '#a855f7', color: 'white', border: 'none', padding: '0.4rem 0.8rem', borderRadius: '0.5rem', fontWeight: 600, fontSize: '0.8rem', cursor: 'pointer' }}
-                  >
-                    Log
-                  </button>
-                </form>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '200px', overflowY: 'auto' }}>
-                  {project.memory_items && project.memory_items.map((item, idx) => (
-                    <div key={idx} style={{ padding: '0.6rem', background: '#f8fafc', borderRadius: '0.5rem', borderLeft: `3px solid ${item.category === 'constraint' ? '#f43f5e' : item.category === 'decision' ? '#3b82f6' : '#10b981'}`, fontSize: '0.8rem' }}>
-                      <div style={{ fontWeight: 700, fontSize: '0.7rem', textTransform: 'uppercase', color: '#64748b', marginBottom: '0.15rem' }}>{item.category}</div>
-                      <div style={{ color: '#334155' }}>{item.content}</div>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.25rem' }}>Level: {nodeDetail.level}</p>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  {nodeDetail.progress && (
+                    <span className="mastery-badge">Mastery: {nodeDetail.progress.mastery_score}%</span>
+                  )}
+                  {showDeleteConfirm ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '0.8rem', color: 'var(--error)' }}>Delete?</span>
+                      <button onClick={handleDeleteTopic} className="icon-btn danger"><Check size={16} /></button>
+                      <button onClick={() => setShowDeleteConfirm(false)} className="icon-btn"><X size={16} /></button>
                     </div>
-                  ))}
+                  ) : (
+                    <button onClick={() => setShowDeleteConfirm(true)} className="icon-btn danger-hover" title="Delete topic">
+                      <Trash2 size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
-
-            </div>
-          </div>
-        )}
-
-        {/* TAB 2: ACCOUNTABILITY CHAT */}
-        {activeTab === 'chat' && (
-          <div style={{ height: 'calc(100vh - 135px)', display: 'grid', gridTemplateRows: '1fr auto', overflow: 'hidden' }}>
-            
-            {/* Message Area */}
-            <div style={{ overflowY: 'auto', padding: '2rem' }}>
-              {!conversation ? (
-                <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100%', gap: '1rem', color: '#64748b' }}>
-                  <Brain size={48} style={{ color: '#cbd5e1' }} />
-                  <p style={{ fontWeight: 600, color: '#475569' }}>Goal Coach Session is Uninitialized</p>
-                  <button
-                    onClick={initializeChat}
-                    disabled={chatLoading}
-                    style={{ background: '#6366f1', color: 'white', border: 'none', padding: '0.75rem 1.5rem', borderRadius: '0.75rem', fontWeight: 600, cursor: 'pointer' }}
-                  >
-                    Start Accountability Chat
-                  </button>
-                </div>
-              ) : messages.length === 0 ? (
-                <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100%', color: '#64748b', textAlign: 'center' }}>
-                  <Target size={36} style={{ color: '#cbd5e1', marginBottom: '0.5rem' }} />
-                  <p style={{ fontWeight: 600 }}>Conversation initialized!</p>
-                  <p style={{ fontSize: '0.8rem' }}>Ask your Chief of Staff AI for advice, or request guidance on today's priorities.</p>
-                </div>
-              ) : (
-                <div style={{ maxWidth: '800px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                  {messages.map((msg, idx) => (
-                    <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '80%', gap: '0.25rem' }}>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#64748b', alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', textTransform: 'uppercase' }}>
-                        {msg.role === 'user' ? 'You' : 'Chief of Staff AI'}
-                      </div>
-                      
-                      {/* Thought block for assistant reasoning */}
-                      {msg.reasoning && (
-                        <div style={{ background: '#f1f5f9', borderLeft: '3px solid #cbd5e1', padding: '0.75rem', borderRadius: '0.5rem', fontSize: '0.8rem', color: '#475569', marginBottom: '0.5rem', fontStyle: 'italic' }}>
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.reasoning}</ReactMarkdown>
-                        </div>
-                      )}
-
-                      <div
-                        style={{
-                          background: msg.role === 'user' ? '#6366f1' : 'white',
-                          color: msg.role === 'user' ? 'white' : '#1e293b',
-                          padding: '1rem',
-                          borderRadius: msg.role === 'user' ? '1rem 1rem 0 1rem' : '1rem 1rem 1rem 0',
-                          border: msg.role === 'user' ? 'none' : '1px solid #e2e8f0',
-                          boxShadow: '0 1px 2px 0 rgba(0,0,0,0.05)',
-                          fontSize: '0.95rem',
-                          lineHeight: 1.5
-                        }}
-                      >
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-                      </div>
-                    </div>
-                  ))}
-                  <div ref={chatBottomRef} />
+              
+              {nodeDetail.progress && (
+                <div className="progress-bar-container">
+                  <div className="progress-bar" style={{ width: `${nodeDetail.progress.mastery_score}%` }}></div>
                 </div>
               )}
             </div>
 
-            {/* Input Bar */}
-            {conversation && (
-              <div style={{ background: 'white', borderTop: '1px solid #e2e8f0', padding: '1.25rem 2rem' }}>
-                <form onSubmit={handleSendMessage} style={{ maxWidth: '800px', margin: '0 auto', display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                  
-                  {/* Model Selector in chat */}
-                  <select
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    style={{ padding: '0.6rem', border: '1px solid #e2e8f0', borderRadius: '0.75rem', background: '#f8fafc', fontSize: '0.8rem', outline: 'none' }}
-                  >
-                    {models.map((m, i) => (
-                      <option key={i} value={m.model_name}>{m.model_name}</option>
+            {/* Locked Warning */}
+            {nodeDetail.locked && (
+              <div className="locked-alert">
+                <Lock size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                <div>
+                  <h4 style={{ fontWeight: 600 }}>Topic Prerequisites Locked</h4>
+                  <p style={{ fontSize: '0.85rem', marginTop: '0.25rem' }}>
+                    Master (&ge;70%) the following prerequisites to unlock:
+                  </p>
+                  <ul style={{ paddingLeft: '1.25rem', marginTop: '0.5rem', fontSize: '0.85rem' }}>
+                    {nodeDetail.prerequisites.map((p: any) => (
+                      <li key={p.id} style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setSelectedNodeId(p.id)}>
+                        {p.name}
+                      </li>
                     ))}
-                  </select>
-
-                  <input
-                    type="text"
-                    placeholder="Ask how to unblock your goals..."
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    disabled={chatLoading}
-                    style={{ flex: 1, padding: '0.75rem 1rem', border: '1px solid #e2e8f0', borderRadius: '0.75rem', outline: 'none' }}
-                  />
-                  <button
-                    type="submit"
-                    disabled={chatLoading || !inputValue}
-                    style={{
-                      background: '#6366f1',
-                      color: 'white',
-                      border: 'none',
-                      padding: '0.75rem',
-                      borderRadius: '50%',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      opacity: (chatLoading || !inputValue) ? 0.7 : 1
-                    }}
-                  >
-                    <Send size={18} />
-                  </button>
-                </form>
+                  </ul>
+                </div>
               </div>
             )}
-          </div>
-        )}
 
-        {/* TAB 3: WEEKLY REVIEW */}
-        {activeTab === 'review' && (
-          <div style={{ maxWidth: '800px', margin: '2rem auto', padding: '0 2rem 4rem' }}>
-            <div style={{ background: 'white', border: '1px solid #e2e8f0', borderRadius: '1.25rem', padding: '2.5rem', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)' }}>
+            {/* Description (inline editable) */}
+            {editingDesc ? (
+              <div style={{ marginBottom: '2rem' }}>
+                <textarea value={editDescValue} onChange={e => setEditDescValue(e.target.value)}
+                  rows={3}
+                  style={{ width: '100%', padding: '0.75rem', borderRadius: '0.75rem', border: '1px solid var(--primary)', fontSize: '1rem', fontFamily: 'inherit', resize: 'vertical' }}
+                  autoFocus />
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                  <button onClick={saveEditDesc} className="icon-btn success"><Check size={16} /> Save</button>
+                  <button onClick={() => setEditingDesc(false)} className="icon-btn"><X size={16} /> Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <p style={{ fontSize: '1.05rem', color: '#334155', marginBottom: '2rem', lineHeight: '1.6', cursor: 'pointer' }}
+                onClick={startEditDesc}>
+                {nodeDetail.description}
+                <Pencil size={12} style={{ marginLeft: '0.5rem', color: 'var(--text-muted)', opacity: 0.4 }} />
+              </p>
+            )}
+
+            {/* Action Grid */}
+            <div className="node-grid">
               
-              <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-                <FileText size={48} style={{ color: '#6366f1', margin: '0 auto 1rem' }} />
-                <h3 style={{ fontSize: '1.5rem', fontWeight: 800, color: '#0f172a', marginBottom: '0.5rem' }}>Weekly Executive Review</h3>
-                <p style={{ color: '#64748b', fontSize: '0.9rem' }}>
-                  Analyze completion rates, strategic alignment, bottleneck risks, and plan next week's adjustments.
-                </p>
+              {/* Box 1: SVG Graph & Decomposition */}
+              <div className="detail-card">
+                <h3><Network size={18} /> Relations Graph</h3>
+                {renderLocalGraph()}
+                
+                {/* Decompose Preview/Confirm */}
+                {!nodeDetail.artifact_type && (
+                  <div style={{ marginTop: '1.25rem' }}>
+                    {decomposeProposals ? (
+                      <div>
+                        <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.75rem', color: '#0f172a' }}>
+                          Proposed Sub-Topics (select to approve):
+                        </h4>
+                        {decomposeProposals.map((p, i) => (
+                          <label key={p.id} className={`proposal-item ${p.selected ? 'selected' : ''}`}>
+                            <input type="checkbox" checked={p.selected} onChange={() => toggleProposal(i)} />
+                            <div>
+                              <strong>{p.name}</strong>
+                              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>{p.description}</p>
+                            </div>
+                          </label>
+                        ))}
+                        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+                          <button onClick={handleDecomposeConfirm} className="auth-button" style={{ padding: '0.5rem', flex: 1 }}
+                            disabled={confirmingDecompose}>
+                            {confirmingDecompose ? <RefreshCw className="animate-spin" size={16} /> : <Check size={16} />}
+                            Confirm Selected
+                          </button>
+                          <button onClick={() => setDecomposeProposals(null)} className="auth-button"
+                            style={{ padding: '0.5rem', flex: 1, background: 'var(--bg-subtle)', color: 'var(--text)', border: '1px solid var(--border)' }}>
+                            <X size={16} /> Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button onClick={handleDecomposePreview} disabled={decomposing} className="auth-button" style={{ padding: '0.6rem' }}>
+                        {decomposing ? <RefreshCw className="animate-spin" size={16} /> : <Play size={16} />}
+                        {decomposing ? 'Generating proposals...' : 'Decompose Topic Node'}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
-              <button
-                onClick={triggerWeeklyReviewReport}
-                disabled={loadingReview}
-                style={{
-                  background: '#6366f1',
-                  color: 'white',
-                  border: 'none',
-                  padding: '0.8rem 1.5rem',
-                  borderRadius: '0.75rem',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '0.5rem',
-                  marginBottom: '2rem'
-                }}
-              >
-                {loadingReview ? (
-                  <>
-                    <RefreshCw size={16} className="animate-spin" /> Compiling Weekly Analytics...
-                  </>
-                ) : (
-                  'Generate Weekly Executive Assessment'
-                )}
-              </button>
-
-              {reviewReport && (
-                <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '2rem', color: '#334155', lineHeight: 1.6 }} className="review-markdown">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{reviewReport}</ReactMarkdown>
+              {/* Box 2: Scoped Tutor Chat */}
+              <div className="detail-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                <div>
+                  <h3><MessageSquare size={18} /> Scoped AI Tutor</h3>
+                  <div className="chat-messages">
+                    {chatMessages.length === 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', gap: '0.5rem' }}>
+                        <HelpCircle size={32} />
+                        <p style={{ fontSize: '0.85rem' }}>Ask your personal tutor about {nodeDetail.name}!</p>
+                      </div>
+                    ) : (
+                      chatMessages.map((m, i) => (
+                        <div key={i} className={`message-bubble ${m.role}`}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                        </div>
+                      ))
+                    )}
+                    {chatLoading && <div className="message-bubble assistant">Thinking...</div>}
+                    <div ref={chatEndRef} />
+                  </div>
                 </div>
-              )}
+                <form onSubmit={handleSendMessage} className="chat-input-row">
+                  <input type="text" placeholder="Ask a question..." value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)} disabled={chatLoading} />
+                  <button type="submit" className="chat-send-btn" disabled={chatLoading}><Send size={16} /></button>
+                </form>
+              </div>
 
+              {/* Box 3: Update Progress (full span) */}
+              <div className="detail-card" style={{ gridColumn: 'span 2' }}>
+                <h3><Award size={18} /> Update Mastery Progress</h3>
+                <form onSubmit={handleSaveProgress} style={{ display: 'grid', gridTemplateColumns: '150px 1fr auto', gap: '1.5rem', alignItems: 'end' }}>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label>Mastery Score (0-100)</label>
+                    <input type="number" min={0} max={100} value={masteryInput}
+                      onChange={(e) => setMasteryInput(Number(e.target.value))} style={{ paddingLeft: '1rem' }} />
+                  </div>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label>Study Notes & Obstacles</label>
+                    <input type="text" placeholder="What concepts are hard? What went well?"
+                      value={notesInput} onChange={(e) => setNotesInput(e.target.value)} style={{ paddingLeft: '1rem' }} />
+                  </div>
+                  <button type="submit" className="auth-button" style={{ width: 'auto', padding: '0.75rem 2rem' }} disabled={savingProgress}>
+                    {savingProgress ? 'Saving...' : 'Save Progress'}
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* HIGH LEVEL DASHBOARD VIEW */
+          <div>
+            <div className="node-header" style={{ marginBottom: '2rem' }}>
+              <h1 style={{ fontSize: '2rem', fontWeight: 800, color: '#0f172a' }}>Knowledge Explorer</h1>
+              <p style={{ color: 'var(--text-muted)' }}>Tell me what you want to learn, and I'll build your study plan.</p>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+              
+              {/* Planning Chat */}
+              <div className="detail-card planning-chat-card">
+                <h3><Sparkles size={18} /> Planning Chat</h3>
+                <div className="chat-messages planning-messages">
+                  {planMessages.length === 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', gap: '0.75rem', padding: '2rem' }}>
+                      <Sparkles size={36} style={{ opacity: 0.3 }} />
+                      <p style={{ fontSize: '0.9rem', textAlign: 'center', lineHeight: '1.6' }}>
+                        Tell me what you want to learn!<br />
+                        <em>"I want to prepare for Google interviews"</em><br />
+                        <em>"Help me learn Kubernetes"</em><br />
+                        <em>"Add machine learning to my plan"</em>
+                      </p>
+                    </div>
+                  ) : (
+                    planMessages.map((m, i) => (
+                      <div key={i} className={`message-bubble ${m.role}`}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                      </div>
+                    ))
+                  )}
+                  {planLoading && <div className="message-bubble assistant"><RefreshCw className="animate-spin" size={16} /> Building your plan...</div>}
+                  <div ref={planEndRef} />
+                </div>
+                <form onSubmit={handlePlanSend} className="chat-input-row">
+                  <input type="text" placeholder="What do you want to learn?" value={planInput}
+                    onChange={(e) => setPlanInput(e.target.value)} disabled={planLoading} />
+                  <button type="submit" className="chat-send-btn" disabled={planLoading}><Send size={16} /></button>
+                </form>
+              </div>
+
+              {/* Right column: Agenda + Weekly Review */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+                
+                {/* Daily Agenda */}
+                <div>
+                  <h2 style={{ fontSize: '1.25rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#0f172a' }}>
+                    <CheckCircle2 size={20} style={{ color: 'var(--success)' }} /> Daily Study Agenda
+                  </h2>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
+                    Top recommendations by Intelligent Prioritization Score.
+                  </p>
+
+                  {dailyAgenda.length === 0 ? (
+                    <div style={{ border: '1px dashed var(--border)', borderRadius: '1rem', padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                      <BookOpen size={28} style={{ margin: '0 auto 0.75rem' }} />
+                      <p style={{ fontSize: '0.85rem' }}>No recommendations yet. Start by telling the planner what you want to learn!</p>
+                    </div>
+                  ) : (
+                    <div className="agenda-grid">
+                      {dailyAgenda.map(item => (
+                        <div key={item.id} className="agenda-card" onClick={() => setSelectedNodeId(item.id)}>
+                          <div>
+                            <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              {item.artifact_type?.replace('_', ' ')}
+                            </span>
+                            <h4 style={{ fontWeight: 600, marginTop: '0.2rem', fontSize: '1rem', color: '#0f172a' }}>{item.name}</h4>
+                          </div>
+                          <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--border)', paddingTop: '0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-muted)' }}>
+                              {item.progress?.mastery_score || 0}%
+                            </span>
+                            <ChevronRight size={16} style={{ color: 'var(--primary)' }} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Weekly Review */}
+                <div className="detail-card" style={{ height: 'fit-content' }}>
+                  <h3 style={{ margin: 0 }}><AlertTriangle size={18} style={{ color: 'var(--warning)' }} /> Weekly Graph Review</h3>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.5rem', marginBottom: '1.5rem' }}>
+                    Analyze mastery thresholds and bottleneck prerequisites.
+                  </p>
+                  <button onClick={runWeeklyReview} className="auth-button" style={{ padding: '0.6rem' }} disabled={loadingReview}>
+                    {loadingReview ? 'Analyzing...' : 'Generate Review Report'}
+                  </button>
+                  {weeklyReviewReport && (
+                    <div style={{ marginTop: '1.5rem', borderTop: '1px solid var(--border)', paddingTop: '1rem', fontSize: '0.9rem', lineHeight: '1.6', overflowY: 'auto', maxHeight: '300px' }}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{weeklyReviewReport}</ReactMarkdown>
+                    </div>
+                  )}
+                </div>
+
+              </div>
             </div>
           </div>
         )}
-
-      </div>
+      </main>
     </div>
   );
 };

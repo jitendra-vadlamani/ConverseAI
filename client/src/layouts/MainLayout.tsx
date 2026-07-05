@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { LogOut, Settings } from 'lucide-react';
 
@@ -11,6 +11,7 @@ interface MainLayoutProps {
 export const MainLayout: React.FC<MainLayoutProps> = ({ children, hidePadding }) => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const handleLogout = async () => {
     await logout();
@@ -22,14 +23,8 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children, hidePadding })
       <header className="app-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
           <Link to="/" className="brand-link" style={{ textDecoration: 'none' }}>
-            <h1 className="brand-title">ConverseAI</h1>
+            <h1 className="brand-title">Knowledge Map</h1>
           </Link>
-          {user && (
-            <nav style={{ display: 'flex', gap: '1.25rem', fontSize: '0.95rem', fontWeight: 500 }}>
-              <Link to="/" style={{ color: '#64748b', textDecoration: 'none', transition: 'color 0.2s' }} onMouseOver={(e) => e.currentTarget.style.color = '#4f46e5'} onMouseOut={(e) => e.currentTarget.style.color = '#64748b'}>General Chat</Link>
-              <Link to="/projects" style={{ color: '#64748b', textDecoration: 'none', transition: 'color 0.2s' }} onMouseOver={(e) => e.currentTarget.style.color = '#4f46e5'} onMouseOut={(e) => e.currentTarget.style.color = '#64748b'}>Chief of Staff</Link>
-            </nav>
-          )}
         </div>
 
         {user && (

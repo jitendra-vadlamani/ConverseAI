@@ -26,6 +26,10 @@ type Config struct {
 	DefaultCodingModel     string
 	DefaultTranslationModel string
 	DBEncryptionKey         string
+	LLMBackend              string
+	LLMBaseURL              string
+	LLMModel                string
+	PostgresURI             string
 }
 
 func LoadConfig() *Config {
@@ -53,6 +57,10 @@ func LoadConfig() *Config {
 		DefaultCodingModel:     getEnv("DEFAULT_CODING_MODEL", "qwen3-coder:latest"),
 		DefaultTranslationModel: getEnv("DEFAULT_TRANSLATION_MODEL", "translategemma:12b"),
 		DBEncryptionKey:         getEnv("DB_ENCRYPTION_KEY", "converseai_db_secret_key_32bytes"),
+		LLMBackend:              getEnv("LLM_BACKEND", "ollama"),
+		LLMBaseURL:              getEnv("LLM_BASE_URL", getEnv("OLLAMA_BASE_URL", "http://localhost:11434")),
+		LLMModel:                getEnv("LLM_MODEL", getEnv("DEFAULT_CHAT_MODEL", "gemma4-cos")),
+		PostgresURI:             getEnv("POSTGRES_URI", "postgres://postgres:postgres@localhost:5432/converseai?sslmode=disable"),
 	}
 
 	if cfg.JWTSecret == "converseai" {

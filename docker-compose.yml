@@ -1,38 +1,17 @@
 services:
-  converseai-db:
-    image: mongo:latest
-    container_name: converseai-db
-    networks:
-      - converseai-net
-    ports:
-      - "${HOST_PORT_DB:-27018}:27017"
-    volumes:
-      - converseai_db_data:/data/db
-    restart: always
 
-  converseai-storage:
-    image: minio/minio:latest
-    container_name: converseai-storage
-    command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+  converseai-pg:
+    image: postgres:15
+    container_name: converseai-pg
     environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password123}
-    volumes:
-      - converseai_storage_data:/data
-    networks:
-      - converseai-net
-    restart: always
-
-  converseai-vector:
-    image: chromadb/chroma:latest
-    container_name: converseai-vector
-    volumes:
-      - converseai_vector_data:/index_data
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=converseai
     ports:
-      - "8000:8000"
+      - "5432:5432"
+    volumes:
+      - converseai_pg_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
     networks:
       - converseai-net
     restart: always
@@ -44,17 +23,9 @@ services:
       - "${HOST_PORT_APP:-8080}:8080"
     environment:
       - PORT=8080
-      - MONGO_URI=${MONGO_URI:-mongodb://converseai-db:27017}
-      - DB_NAME=${DB_NAME:-ai_chat}
+      - POSTGRES_URI=${POSTGRES_URI:-postgres://postgres:postgres@converseai-pg:5432/converseai?sslmode=disable}
       - JWT_SECRET=${JWT_SECRET}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-converseai-storage:9000}
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password123}
-      - MINIO_BUCKET=${MINIO_BUCKET:-converseai}
-      - MINIO_USE_SSL=false
-      - CHROMA_URL=${CHROMA_URL:-http://converseai-vector:8000}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - DEFAULT_PLANNER_MODEL=${DEFAULT_PLANNER_MODEL}
       - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL}
       - DEFAULT_OCR_MODEL=${DEFAULT_OCR_MODEL}
@@ -66,15 +37,11 @@ services:
     networks:
       - converseai-net
     depends_on:
-      - converseai-db
-      - converseai-storage
-      - converseai-vector
+      - converseai-pg
 
 networks:
   converseai-net:
     driver: bridge
 
 volumes:
-  converseai_db_data:
-  converseai_storage_data:
-  converseai_vector_data:
+  converseai_pg_data:
