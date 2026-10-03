@@ -162,10 +162,10 @@ const FeedbackButtons: React.FC<{ conversationId: string; message: Message }> = 
 
   return (
     <div className="feedback-row">
-      <button className={`feedback-btn ${rating === 1 ? 'selected' : ''}`} onClick={() => send(1)} title="Good answer">
+      <button className={`feedback-btn ${rating === 1 ? 'selected' : ''}`} onClick={() => send(1)} title="Good answer" aria-label="Good answer" aria-pressed={rating === 1}>
         <ThumbsUp size={13} />
       </button>
-      <button className={`feedback-btn ${rating === -1 ? 'selected' : ''}`} onClick={() => send(-1)} title="Bad answer">
+      <button className={`feedback-btn ${rating === -1 ? 'selected' : ''}`} onClick={() => send(-1)} title="Bad answer" aria-label="Bad answer" aria-pressed={rating === -1}>
         <ThumbsDown size={13} />
       </button>
     </div>
@@ -467,10 +467,10 @@ export const Chat: React.FC = () => {
                 <>
                   <span className="conv-title" title={conv.title}>{conv.title}</span>
                   <div className="conv-actions">
-                    <button className="edit-conv-btn" onClick={(e) => startEditing(e, conv)} title="Rename">
+                    <button className="edit-conv-btn" onClick={(e) => startEditing(e, conv)} title="Rename" aria-label={`Rename ${conv.title}`}>
                       <Edit3 size={14} />
                     </button>
-                    <button className="delete-conv-btn" onClick={(e) => handleDeleteConversation(e, conv.id)} title="Delete">
+                    <button className="delete-conv-btn" onClick={(e) => handleDeleteConversation(e, conv.id)} title="Delete" aria-label={`Delete ${conv.title}`}>
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -533,12 +533,14 @@ export const Chat: React.FC = () => {
                       type="button"
                       className="action-btn"
                       onClick={triggerFileInput}
-                      title="Upload Files"
+                      title="Upload files"
+                      aria-label="Upload files"
                     >
                       <Paperclip size={18} />
                     </button>
                   </div>
                   <textarea
+                    aria-label="Message"
                     rows={Math.min(5, input.split('\n').length)}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
@@ -555,7 +557,8 @@ export const Chat: React.FC = () => {
                     type="submit"
                     className={`send-btn ${(input.trim() || selectedFiles.length > 0) && !loading ? 'active' : ''}`}
                     onClick={loading ? handleStop : handleSend}
-                    title={loading ? 'Stop Generating' : 'Send Message'}
+                    title={loading ? 'Stop generating' : 'Send message'}
+                    aria-label={loading ? 'Stop generating' : 'Send message'}
                   >
                     {loading ? <XCircle size={18} /> : <Send size={18} />}
                   </button>
@@ -736,12 +739,14 @@ export const Chat: React.FC = () => {
                       type="button"
                       className="action-btn"
                       onClick={triggerFileInput}
-                      title="Upload Files"
+                      title="Upload files"
+                      aria-label="Upload files"
                     >
                       <Paperclip size={18} />
                     </button>
                   </div>
                   <textarea
+                    aria-label="Message"
                     rows={1}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
@@ -758,6 +763,8 @@ export const Chat: React.FC = () => {
                     className={`send-btn ${(input.trim() || selectedFiles.length > 0) && !loading ? 'active' : ''}`}
                     onClick={loading ? handleStop : handleSend}
                     disabled={(!input.trim() && selectedFiles.length === 0) && !loading}
+                    title={loading ? 'Stop generating' : 'Send message'}
+                    aria-label={loading ? 'Stop generating' : 'Send message'}
                   >
                     {loading ? <XCircle size={18} /> : <Send size={18} />}
                   </button>

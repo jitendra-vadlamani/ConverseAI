@@ -129,9 +129,10 @@ func New(ctx context.Context, cfg *config.Config, static fs.FS, ov Overrides) (*
 	auth := mw.RequireAuth
 
 	byIP := middleware.ByIP(cfg.TrustProxy)
-	loginLimit := middleware.NewRateLimiter("login", 10, 5)
-	registerLimit := middleware.NewRateLimiter("register", 5, 3)
-	completionLimit := middleware.NewRateLimiter("completion", 20, 5)
+	burst := func(perMin int) int { return max(3, perMin/4) }
+	loginLimit := middleware.NewRateLimiter("login", cfg.LoginRatePerMin, burst(cfg.LoginRatePerMin))
+	registerLimit := middleware.NewRateLimiter("register", cfg.RegisterRatePerMin, burst(cfg.RegisterRatePerMin))
+	completionLimit := middleware.NewRateLimiter("completion", cfg.CompletionRatePerMin, burst(cfg.CompletionRatePerMin))
 	apiLimit := middleware.NewRateLimiter("api", 600, 120)
 	api := func(h http.HandlerFunc) http.HandlerFunc { return auth(apiLimit.Limit(middleware.ByUser, h)) }
 

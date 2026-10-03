@@ -67,6 +67,12 @@ type Config struct {
 	RunTimeout        time.Duration
 	MaxUploadBytes    int64
 
+	// Requests per minute allowed per client IP (login, register) or per
+	// user (completions).
+	LoginRatePerMin      int
+	RegisterRatePerMin   int
+	CompletionRatePerMin int
+
 	OTLPEndpoint string // optional: enables OpenTelemetry trace export
 }
 
@@ -118,6 +124,10 @@ func LoadConfig() (*Config, error) {
 		RunTimeout:        getDuration("RUN_TIMEOUT", 15*time.Minute),
 		MaxUploadBytes:    int64(getInt("MAX_UPLOAD_MB", 25)) << 20,
 
+		LoginRatePerMin:      getInt("LOGIN_RATE_PER_MIN", 10),
+		RegisterRatePerMin:   getInt("REGISTER_RATE_PER_MIN", 5),
+		CompletionRatePerMin: getInt("COMPLETION_RATE_PER_MIN", 20),
+
 		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 	}
 
@@ -149,6 +159,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxNumCtx < 2048 {
 		errs = append(errs, errors.New("MAX_NUM_CTX must be at least 2048"))
+	}
+	if c.LoginRatePerMin < 1 || c.RegisterRatePerMin < 1 || c.CompletionRatePerMin < 1 {
+		errs = append(errs, errors.New("rate limits must be at least 1 per minute"))
 	}
 	if c.MaxConcurrentRuns < 1 {
 		errs = append(errs, errors.New("MAX_CONCURRENT_RUNS must be at least 1"))

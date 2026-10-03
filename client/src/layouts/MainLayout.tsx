@@ -26,10 +26,10 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children, hidePadding })
 
         {user && (
           <div className="header-actions">
-            <Link to="/settings" className="settings-link">
+            <Link to="/settings" className="settings-link" aria-label="Settings" title="Settings">
               <Settings size={20} />
             </Link>
-            <button onClick={handleLogout} className="logout-btn" title="Logout">
+            <button onClick={handleLogout} className="logout-btn" title="Logout" aria-label="Logout">
               <LogOut size={20} />
             </button>
           </div>

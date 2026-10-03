@@ -10,6 +10,7 @@ func valid() *Config {
 		JWTSecret: strings.Repeat("s", 40), DBEncryptionKey: "0123456789abcdef0123456789abcdef",
 		MinioUser: "converse", MinioPass: "a-real-password", MaxNumCtx: 8192, MaxConcurrentRuns: 1,
 		EmbeddingModel: "e", DefaultChatModel: "c",
+		LoginRatePerMin: 10, RegisterRatePerMin: 5, CompletionRatePerMin: 20,
 	}
 }
 

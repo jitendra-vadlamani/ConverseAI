@@ -6,6 +6,8 @@ ai-chat-app.exe
 *.test
 *.prof
 coverage.out
+/converseai-e2e
+/fakeollama-e2e
 
 # React
 client/dist
