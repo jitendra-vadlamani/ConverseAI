@@ -1,0 +1,38 @@
+name: Evals
+
+# The golden-set evals need a real Ollama with the configured models, which
+# GitHub-hosted runners don't have. Run them on a self-hosted runner that can
+# reach your Ollama (label it "ollama"), manually or before a release.
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: ConverseAI URL to evaluate
+        required: true
+        default: http://localhost:8080
+      model:
+        description: Chat model
+        required: true
+        default: gemma4:latest
+
+jobs:
+  evals:
+    runs-on: [self-hosted, ollama]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run golden set
+        env:
+          EVAL_EMAIL: ${{ secrets.EVAL_EMAIL }}
+          EVAL_PASSWORD: ${{ secrets.EVAL_PASSWORD }}
+        run: |
+          go run ./cmd/eval \
+            -base-url "${{ inputs.base_url }}" -model "${{ inputs.model }}" \
+            -golden evals/golden.jsonl -baseline evals/baseline.json -out evals/results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: evals/results

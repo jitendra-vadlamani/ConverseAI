@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go build, vet, lint, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # main.go embeds the built client; a placeholder is enough for Go checks.
+      - run: mkdir -p client/dist && echo '<!doctype html>' > client/dist/index.html
+      - name: gofmt
+        run: test -z "$(gofmt -l main.go internal)" || (gofmt -l main.go internal; exit 1)
+      - run: go build ./...
+      - run: go vet . ./internal/... ./cmd/...
+      - uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2025.1.1"
+          install-go: false
+      - run: go test -race -count=1 ./internal/...
+
+  integration:
+    name: End-to-end tests (MongoDB, MinIO, Chroma)
+    runs-on: ubuntu-latest
+    needs: go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: mkdir -p client/dist && echo '<!doctype html>' > client/dist/index.html
+      - run: docker compose -f docker-compose.ci.yml up -d
+      - name: Wait for services
+        run: |
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:18000/api/v2/heartbeat >/dev/null \
+              && curl -fsS http://127.0.0.1:19000/minio/health/live >/dev/null \
+              && break
+            sleep 2
+          done
+      - run: go test -tags=integration -race -count=1 ./internal/e2e/
+      - if: failure()
+        run: docker compose -f docker-compose.ci.yml logs --tail=100
+
+  client:
+    name: Client lint and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  docker:
+    name: Production image builds
+    runs-on: ubuntu-latest
+    needs: [go, client]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg VERSION=${{ github.sha }} -t converseai:ci .

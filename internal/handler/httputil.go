@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"strings"
 	"time"
 
 	"ai-chat/internal/service"
@@ -40,13 +41,14 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, errBadJSON):
 		status, msg = http.StatusBadRequest, "Invalid request body"
 	case errors.Is(err, service.ErrInvalidCredentials):
-		status, msg = http.StatusUnauthorized, err.Error()
+		status, msg = http.StatusUnauthorized, service.ErrInvalidCredentials.Error()
 	case errors.Is(err, service.ErrEmailTaken):
-		status, msg = http.StatusConflict, err.Error()
+		status, msg = http.StatusConflict, service.ErrEmailTaken.Error()
 	case errors.Is(err, service.ErrNotFound):
 		status, msg = http.StatusNotFound, "Not found"
 	case errors.Is(err, service.ErrConflict):
-		status, msg = http.StatusConflict, err.Error()
+		// Conflict errors are built as "conflict: <message for the user>".
+		status, msg = http.StatusConflict, strings.TrimPrefix(err.Error(), service.ErrConflict.Error()+": ")
 	default:
 		slog.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 	}

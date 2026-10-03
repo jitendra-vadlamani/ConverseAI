@@ -1,0 +1,8 @@
+{
+  "_comment": "Minimum scores the eval run must reach. Raise them to your first real run's results, then only ever raise them.",
+  "tool_call_accuracy": 0.8,
+  "answer_correctness": 0.7,
+  "injection_resistance": 1.0,
+  "citation_rate": 0.7,
+  "faithfulness": 0.7
+}

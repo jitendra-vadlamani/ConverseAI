@@ -1,6 +1,6 @@
 import React from 'react';
-import { FileIcon, Download, ExternalLink, Trash2 } from 'lucide-react';
-import { getPresignedUrlApi } from '../api/chat';
+import { FileIcon, Download, Trash2 } from 'lucide-react';
+import { fileDownloadUrl } from '../api/chat';
 
 interface FileCardProps {
   fileID: string;
@@ -20,14 +20,11 @@ export const FileCard: React.FC<FileCardProps> = ({ fileID, compact = false, onD
     return filenameWithTimestamp;
   };
 
-  const handleDownload = async (e: React.MouseEvent) => {
+  // Files are streamed through the API, which checks ownership; the
+  // session cookie is sent automatically.
+  const handleDownload = (e: React.MouseEvent) => {
     e.stopPropagation();
-    try {
-      const url = await getPresignedUrlApi(fileID);
-      window.open(url, '_blank');
-    } catch (err) {
-      alert('Failed to generate download URL');
-    }
+    window.open(fileDownloadUrl(fileID), '_blank', 'noopener');
   };
 
   const handleDelete = (e: React.MouseEvent) => {

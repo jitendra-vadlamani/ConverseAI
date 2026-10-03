@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+!.env.example
+client/node_modules
+client/dist
+backups
+converseai
+ai-chat-app
+*.test
+docs

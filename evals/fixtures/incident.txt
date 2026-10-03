@@ -1,0 +1,19 @@
+Postmortem: checkout outage on 14 August 2026
+
+Summary: Between 09:12 and 10:47 UTC (95 minutes) about 38% of checkout
+requests failed with HTTP 503.
+
+Root cause: a configuration change reduced the payment service's database
+connection pool from 200 to 20 connections. Under morning traffic the pool was
+exhausted and requests timed out.
+
+Detection: the on-call engineer was paged by the error-rate alert at 09:19,
+seven minutes after impact began.
+
+Resolution: the change was rolled back at 10:41; error rates returned to
+normal by 10:47.
+
+Action items:
+1. Add a pool-size lower bound check to the config validator (owner: Priya).
+2. Alert on connection-pool saturation above 80% (owner: Marcus).
+3. Run a load test before shipping any payment-service config change (owner: Wei).

@@ -1,21 +1,28 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Plus, Trash2, Edit3, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Paperclip, File as FileIcon, X, Search, FileText } from 'lucide-react';
-// import { getEncoding } from 'js-tiktoken';
+import { Send, Plus, Trash2, Edit3, Settings as SettingsIcon, MessageSquare, User, Bot, Loader2, XCircle, ChevronDown, ChevronRight, Brain, Paperclip, File as FileIcon, X, Search, FileText, ThumbsUp, ThumbsDown } from 'lucide-react';
 import {
   listConversationsApi,
   getConversationApi,
+  getEventsApi,
   createConversationApi,
   deleteConversationApi,
   streamCompletionApi,
+  attachRunApi,
+  cancelRunApi,
+  submitFeedbackApi,
   listModelsApi,
   updateConversationTitleApi,
   listConversationFilesApi,
   deleteConversationFileApi,
+  type Conversation,
+  type ConversationSummary,
   type Message,
+  type ModelInfo,
   type ConversationEvent,
-  type Evidence
+  type Evidence,
+  type RunHandlers,
 } from '../api/chat';
 import { Link } from 'react-router-dom';
 import { FileCard } from '../components/FileCard';
@@ -26,18 +33,7 @@ type ThoughtBlockProps = {
 };
 
 const ThoughtBlock: React.FC<ThoughtBlockProps> = ({ thought, defaultOpen = false }) => {
-  const [isOpen, setIsOpen] = useState(isStreamingThought(thought, defaultOpen));
-  
-  function isStreamingThought(t: string, def: boolean): boolean {
-    return t.length > 0 ? true : def;
-  }
-
-  // Effect to open when thought starts arriving
-  useEffect(() => {
-    if (thought.length > 0 && !isOpen) {
-      setIsOpen(true);
-    }
-  }, [thought]);
+  const [isOpen, setIsOpen] = useState(defaultOpen);
 
   if (!thought) return null;
   return (
@@ -52,76 +48,34 @@ const ThoughtBlock: React.FC<ThoughtBlockProps> = ({ thought, defaultOpen = fals
   );
 };
 
-const SourceBadge: React.FC<{ name: string; url?: string }> = ({ name, url }: { name: string; url?: string }) => {
-  const handleClick = (e: React.MouseEvent) => {
-    if (url) {
-      e.preventDefault();
-      window.open(url, '_blank', 'noopener,noreferrer');
-    }
-  };
+// Model output is untrusted: links open in a new tab without access to this
+// page, and react-markdown already drops javascript: URLs and raw HTML.
+const MarkdownContent: React.FC<{ content: string }> = ({ content }) => (
+  <ReactMarkdown
+    remarkPlugins={[remarkGfm]}
+    components={{
+      a: ({ href, children }) => (
+        <a href={href} target="_blank" rel="noopener noreferrer nofollow">{children}</a>
+      ),
+    }}
+  >
+    {content}
+  </ReactMarkdown>
+);
 
-  return (
-    <span 
-      className={`source-badge ${url ? 'clickable' : ''}`} 
-      onClick={handleClick}
-      title={url ? `Open source: ${url}` : `Source: ${name}`}
-    >
-      <FileText size={10} />
-      <span>{name}</span>
-    </span>
-  );
+const payloadString = (payload: ConversationEvent['payload'], key: string): string | undefined => {
+  const v = payload?.[key];
+  return typeof v === 'string' ? v : undefined;
 };
 
-const MarkdownContent: React.FC<{ content: string }> = ({ content }: { content: string }) => {
-  // Regex to match [Source: Name] or [1] etc.
-  // We'll roughly replace them with placeholders that ReactMarkdown components can then pick up
-  // Actually, a simpler way in v1 is to just parse the string before rendering
-  // but let's try to use the 'components' prop for a more robust approach.
-  
-  // Custom component for text to handle citation markers [Source: Name]
-  const renderers = {
-    text: ({ value }: { value: string }) => {
-      const parts = value.split(/(\[Source:\s*[^\]]+\]|\[\d+\])/g);
-      return (
-        <>
-          {parts.map((part, i) => {
-            const match = part.match(/\[Source:\s*([^\]]+)\]/);
-            const numMatch = part.match(/\[(\d+)\]/);
-            if (match) {
-              return <SourceBadge key={i} name={match[1]} url={part.includes('http') ? match[1] : undefined} />;
-            }
-            if (numMatch) {
-              return <SourceBadge key={i} name={numMatch[1]} />;
-            }
-            return part;
-          })}
-        </>
-      );
-    }
-  };
-
-  return (
-    <ReactMarkdown 
-      remarkPlugins={[remarkGfm]}
-      components={renderers as any}
-    >
-      {content}
-    </ReactMarkdown>
-  );
-};
-
-interface EventItemProps {
-  event: ConversationEvent;
-}
-
-const EventItem: React.FC<EventItemProps> = ({ event }) => {
+const EventItem: React.FC<{ event: ConversationEvent }> = ({ event }) => {
   const [isRawOpen, setIsRawOpen] = useState(false);
-  const message: string = event.payload?.message || event.type.replace(/_/g, ' ');
-  
+  const message = payloadString(event.payload, 'message') || event.type.replace(/_/g, ' ');
+
   const getIcon = (): React.ReactNode => {
     switch (event.type) {
-      case 'rag_search_started':
       case 'rag_search_finished':
+      case 'rag_ingested':
         return <Search size={14} />;
       case 'search_started':
       case 'search_finished':
@@ -129,17 +83,15 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => {
       case 'extraction_started':
       case 'extraction_finished':
         return <FileText size={14} className="text-orange-500" />;
-      case 'sufficiency_checked':
-        return <Brain size={14} className="text-green-500" />;
-      case 'grounded_generation_started':
-        return <Loader2 size={14} className="animate-spin text-purple-500" />;
-      case 'planner_output':
-      case 'orchestration_started':
+      case 'tool_decision':
+      case 'run_started':
+      case 'run_resumed':
+      case 'model_routed':
         return <Brain size={14} />;
       case 'task_started':
       case 'task_finished':
         return <Loader2 size={14} className={event.type === 'task_started' ? 'animate-spin' : ''} />;
-      case 'assistant_message_generated':
+      case 'run_finished':
         return <Bot size={14} />;
       case 'attachment_resolved':
         return <Paperclip size={14} />;
@@ -148,47 +100,26 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => {
     }
   };
 
-  const renderSufficiencyResult = () => {
-    if (event.type !== 'sufficiency_checked' || !event.payload) return null;
-    const { covered, missing, score } = event.payload as any;
-    return (
-      <div className="sufficiency-view">
-        <div className="sufficiency-score">
-          Confidence: <span className="score-val">{(score * 100).toFixed(0)}%</span>
-        </div>
-        <div className="sufficiency-grid">
-          <div className="aspect-col covered">
-            <header>Found</header>
-            <ul>{Array.isArray(covered) && covered.map((a: string, i: number) => <li key={i}>{a}</li>)}</ul>
-          </div>
-          <div className="aspect-col missing">
-            <header>Missing</header>
-            <ul>{Array.isArray(missing) && missing.map((a: string, i: number) => <li key={i}>{a}</li>)}</ul>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
   const renderSearchMetadata = () => {
-    if ((event.type !== 'search_finished' && event.type !== 'rag_search_finished') || !event.payload) return null;
-    const results = event.payload.results || [];
+    if (event.type !== 'search_finished' && event.type !== 'rag_search_finished') return null;
+    const results = event.payload?.results;
     if (!Array.isArray(results) || results.length === 0) return null;
-
     return (
       <div className="search-metadata-view">
-        {results.map((res: any, i: number) => (
+        {(results as Evidence[]).map((res, i) => (
           <div key={i} className={`search-result-item ${res.is_conflicting ? 'conflicting' : ''}`}>
             <header>
               <span className="source-label">{res.source}</span>
-              <span className="score-badge main">Score: {(res.final_score * 100).toFixed(0)}%</span>
+              <span className="score-badge main">Score: {((res.final_score || res.relevance_score) * 100).toFixed(0)}%</span>
               {res.is_conflicting && <span className="conflict-tag">CONFLICT</span>}
             </header>
             {res.is_conflicting && <p className="conflict-reason">{res.conflict_reason}</p>}
-            <div className="metrics">
-              <span>Auth: {(res.authority_score * 100).toFixed(0)}%</span>
-              <span>Fresh: {(res.freshness_score * 100).toFixed(0)}%</span>
-            </div>
+            {res.authority_score !== undefined && (
+              <div className="metrics">
+                <span>Auth: {((res.authority_score ?? 0) * 100).toFixed(0)}%</span>
+                <span>Fresh: {((res.freshness_score ?? 0) * 100).toFixed(0)}%</span>
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -204,7 +135,6 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => {
       </div>
       {isRawOpen && (
         <div className="event-details">
-          {renderSufficiencyResult()}
           {renderSearchMetadata()}
           <pre>{JSON.stringify(event.payload, null, 2)}</pre>
         </div>
@@ -213,10 +143,39 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => {
   );
 };
 
+const FeedbackButtons: React.FC<{ conversationId: string; message: Message }> = ({ conversationId, message }) => {
+  const [rating, setRating] = useState<1 | -1 | 0>(0);
+  if (!message.id || message.role !== 'assistant') return null;
+
+  const send = async (value: 1 | -1) => {
+    let correction = '';
+    if (value === -1) {
+      correction = window.prompt('What should the answer have said? (optional)') ?? '';
+    }
+    try {
+      await submitFeedbackApi(conversationId, message.id!, value, correction);
+      setRating(value);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to send feedback');
+    }
+  };
+
+  return (
+    <div className="feedback-row">
+      <button className={`feedback-btn ${rating === 1 ? 'selected' : ''}`} onClick={() => send(1)} title="Good answer">
+        <ThumbsUp size={13} />
+      </button>
+      <button className={`feedback-btn ${rating === -1 ? 'selected' : ''}`} onClick={() => send(-1)} title="Bad answer">
+        <ThumbsDown size={13} />
+      </button>
+    </div>
+  );
+};
+
 export const Chat: React.FC = () => {
-  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
-  const [models, setModels] = useState<any[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModelName, setSelectedModelName] = useState<string>('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -224,7 +183,9 @@ export const Chat: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [streamingThought, setStreamingThought] = useState('');
-  const [abortController, setAbortController] = useState<AbortController | null>(null);
+  const [statusText, setStatusText] = useState('');
+  const abortRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
   const [activeTab, setActiveTab] = useState<'chat' | 'events' | 'files'>('chat');
   const [events, setEvents] = useState<ConversationEvent[]>([]);
   const [conversationFiles, setConversationFiles] = useState<string[]>([]);
@@ -233,94 +194,149 @@ export const Chat: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string>('');
 
-  // useEffect(() => {
-  //   setTokenCount(enc.current.encode(input).length);
-  // }, [input]);
-
-  useEffect(() => {
-    fetchInitialData();
+  const fetchConversations = useCallback(async () => {
+    try {
+      setConversations((await listConversationsApi()) || []);
+    } catch (err) {
+      console.error('Failed to list conversations:', err);
+    }
   }, []);
 
-  const fetchInitialData = async () => {
-    try {
-      const [convs, systemModels] = await Promise.all([
-        listConversationsApi(),
-        listModelsApi()
-      ]);
-      setConversations(convs || []);
-      setModels(systemModels || []);
-      // Default to first model or Auto-Routing
-      if (systemModels && systemModels.length > 0) {
-        setSelectedModelName(systemModels[0].model_name);
+  useEffect(() => {
+    (async () => {
+      try {
+        const [convs, systemModels] = await Promise.all([listConversationsApi(), listModelsApi()]);
+        setConversations(convs || []);
+        setModels(systemModels || []);
+        if (systemModels && systemModels.length > 0) {
+          setSelectedModelName(prev => prev || systemModels[0].model_name);
+        }
+      } catch (err) {
+        console.error('Failed to fetch initial data:', err);
       }
-    } catch (err) {
-      console.error('Failed to fetch initial data:', err);
-    }
-  };
+    })();
+  }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [currentConversation?.messages, streamingContent, streamingThought, events, activeTab]);
-
-  const scrollToBottom = (): void => {
     if (activeTab === 'chat') {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     } else {
       eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
+  }, [currentConversation?.messages, streamingContent, streamingThought, events, activeTab]);
+
+  const resetStreaming = () => {
+    setStreamingContent('');
+    setStreamingThought('');
+    setStatusText('');
   };
 
   const handleNewChat = () => {
+    abortRef.current?.abort();
     setCurrentConversation(null);
-    setStreamingContent('');
-    setStreamingThought('');
+    resetStreaming();
+    setLoading(false);
     setInput('');
     setEvents([]);
+    setConversationFiles([]);
   };
 
-  const loadConversation = async (id: string): Promise<void> => {
+  // followRun streams a run's output into the UI until it finishes, while
+  // live System Logs events are appended from the conversation's event stream.
+  const followRun = async (convId: string, start: (h: RunHandlers, signal: AbortSignal) => Promise<void>) => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+    resetStreaming();
+
+    const eventSource = new EventSource(`/api/chat/conversations/events/stream?id=${encodeURIComponent(convId)}`);
+    eventSource.onmessage = (e: MessageEvent) => {
+      try {
+        const event: ConversationEvent = JSON.parse(e.data);
+        setEvents(prev => (prev.some(p => p.id === event.id) ? prev : [...prev, event]));
+      } catch {
+        // ignore malformed events
+      }
+    };
+
+    let failure = '';
     try {
-      setEvents([]);
+      await start({
+        onRun: id => { runIdRef.current = id; },
+        onThought: t => setStreamingThought(prev => prev + t),
+        onAnswer: text => { setStreamingContent(text); setStatusText(''); },
+        onStatus: t => setStatusText(t),
+        onError: msg => { failure = msg; },
+        onDone: () => {},
+      }, controller.signal);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        failure = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      eventSource.close();
+      runIdRef.current = null;
+      if (abortRef.current === controller) abortRef.current = null;
+    }
+    if (controller.signal.aborted) return;
+    await loadConversation(convId, false);
+    resetStreaming();
+    setLoading(false);
+    fetchConversations();
+    if (failure) alert(`Error: ${failure}`);
+  };
+
+  const loadConversation = async (id: string, attach = true): Promise<void> => {
+    try {
+      if (attach) {
+        abortRef.current?.abort();
+        setEvents([]);
+        resetStreaming();
+        setLoading(false);
+      }
       const [conv, historicalEvents, files] = await Promise.all([
         getConversationApi(id),
-        fetch(`/api/chat/conversations/events?id=${id}`).then((r: Response) => r.json()),
-        listConversationFilesApi(id)
+        getEventsApi(id),
+        listConversationFilesApi(id),
       ]);
       setCurrentConversation(conv);
-      setEvents(historicalEvents || []);
-      setConversationFiles(files || []);
-      // Derive current model from last message if available
-      if (conv.messages && conv.messages.length > 0) {
-        const lastMsg = conv.messages[conv.messages.length - 1];
-        if (lastMsg.model_name) {
-          setSelectedModelName(lastMsg.model_name);
-        }
+      setEvents(historicalEvents);
+      setConversationFiles(files);
+      const lastMsg = conv.messages?.[conv.messages.length - 1];
+      if (lastMsg?.model_name && models.some(m => m.model_name === lastMsg.model_name)) {
+        setSelectedModelName(lastMsg.model_name);
+      }
+      // An answer is still being written (e.g. after a reload): follow it.
+      if (attach && conv.active_run_id) {
+        const runId = conv.active_run_id;
+        runIdRef.current = runId;
+        followRun(conv.id, (h, signal) => attachRunApi(runId, h, signal));
       }
     } catch (err) {
-      alert('Failed to load conversation');
+      alert(err instanceof Error ? err.message : 'Failed to load conversation');
     }
   };
-  
-  const startEditing = (e: React.MouseEvent, conv: Conversation) => {
+
+  const startEditing = (e: React.MouseEvent, conv: ConversationSummary) => {
     e.stopPropagation();
     setEditingId(conv.id);
     setEditingTitle(conv.title);
   };
 
   const handleUpdateTitle = async (id: string) => {
-    if (!editingTitle.trim() || editingTitle === conversations.find(c => c.id === id)?.title) {
+    const title = editingTitle.trim();
+    if (!title || title === conversations.find(c => c.id === id)?.title) {
       setEditingId(null);
       return;
     }
-    
     try {
-      await updateConversationTitleApi(id, editingTitle.trim());
-      setConversations(conversations.map(c => c.id === id ? { ...c, title: editingTitle.trim() } : c));
+      await updateConversationTitleApi(id, title);
+      setConversations(conversations.map(c => (c.id === id ? { ...c, title } : c)));
       if (currentConversation?.id === id) {
-        setCurrentConversation({ ...currentConversation, title: editingTitle.trim() });
+        setCurrentConversation({ ...currentConversation, title });
       }
     } catch (err) {
-      alert('Failed to update title');
+      alert(err instanceof Error ? err.message : 'Failed to update title');
     } finally {
       setEditingId(null);
     }
@@ -339,12 +355,12 @@ export const Chat: React.FC = () => {
     if (!window.confirm('Delete this conversation?')) return;
     try {
       await deleteConversationApi(id);
-      setConversations(conversations.filter((c: Conversation) => c.id !== id));
+      setConversations(conversations.filter(c => c.id !== id));
       if (currentConversation?.id === id) {
         handleNewChat();
       }
     } catch (err) {
-      alert('Failed to delete conversation');
+      alert(err instanceof Error ? err.message : 'Failed to delete conversation');
     }
   };
 
@@ -354,18 +370,18 @@ export const Chat: React.FC = () => {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
     if (e.target.files) {
       const files = Array.from(e.target.files);
-      setSelectedFiles((prev: File[]) => [...prev, ...files]);
+      setSelectedFiles(prev => [...prev, ...files]);
+      e.target.value = '';
     }
   };
   const removeFile = (index: number): void => {
-    setSelectedFiles((prev: File[]) => prev.filter((_: File, i: number) => i !== index));
+    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
   const handleSend = async () => {
-    if (!input.trim() || loading) return;
-
-    const selectedModel = models.find(m => m.model_name === selectedModelName);
-    if (!selectedModel) {
+    const text = input.trim();
+    if (!text || loading) return;
+    if (!models.some(m => m.model_name === selectedModelName)) {
       alert(`Model ${selectedModelName} not found.`);
       return;
     }
@@ -373,111 +389,53 @@ export const Chat: React.FC = () => {
     let conv = currentConversation;
     if (!conv) {
       try {
-        conv = await createConversationApi(input.substring(0, 30));
-        setConversations([conv, ...conversations]);
+        conv = await createConversationApi(text.substring(0, 60));
+        setConversations([{ id: conv.id, title: conv.title, created_at: conv.created_at, updated_at: conv.updated_at }, ...conversations]);
         setCurrentConversation(conv);
       } catch (err) {
-        alert('Failed to create conversation');
+        alert(err instanceof Error ? err.message : 'Failed to create conversation');
         return;
       }
     }
-
-    if (!conv) return;
-
-    const userMsg: Message = { role: 'user', content: input, model_name: selectedModelName };
-    const updatedMessages = [...conv.messages, userMsg];
-    setCurrentConversation({ ...conv, messages: updatedMessages });
+    const convId = conv.id;
+    const files = [...selectedFiles];
+    const userMsg: Message = { role: 'user', content: text, model_name: selectedModelName, attachments: files.map(f => f.name) };
+    setCurrentConversation({ ...conv, messages: [...conv.messages, userMsg] });
     setInput('');
-    setLoading(true);
-    const currentFiles = [...selectedFiles];
     setSelectedFiles([]);
-    setStreamingContent('');
-    setStreamingThought('');
 
-    const controller = new AbortController();
-    setAbortController(controller);
-
-    // Subscribe to Event Stream
-    const eventSource = new EventSource(`/api/chat/conversations/events/stream?id=${conv.id}`);
-    eventSource.onmessage = (e: MessageEvent) => {
-      try {
-        const event: ConversationEvent = JSON.parse(e.data);
-        setEvents((prev: ConversationEvent[]) => [...prev, event]);
-      } catch (err) {}
-    };
-
-    try {
-      await streamCompletionApi(
-        conv.id,
-        selectedModelName,
-        input,
-        (thought: string) => {
-          setStreamingThought((prev: string) => prev + thought);
-        },
-        (chunk: string) => {
-          setStreamingContent((prev: string) => prev + chunk);
-        },
-        async () => {
-          eventSource.close();
-          if (conv?.id) {
-            await Promise.all([
-              loadConversation(conv.id),
-              listConversationFilesApi(conv.id).then(setConversationFiles)
-            ]);
-          }
-          setLoading(false);
-          setStreamingContent('');
-          setStreamingThought('');
-          setAbortController(null);
-          fetchInitialData();
-        },
-        (err: string) => {
-          eventSource.close();
-          setLoading(false);
-          setStreamingContent('');
-          setStreamingThought('');
-          setAbortController(null);
-          alert(`Error: ${err}`);
-          console.error(err);
-        },
-        currentFiles,
-        controller.signal
-      );
-    } catch (error: any) {
-      eventSource.close();
-      alert(`Streaming error: ${error.message || error}`);
-      console.error('Streaming error:', error);
-    }
+    await followRun(convId, (h, signal) => streamCompletionApi(convId, selectedModelName, text, h, files, signal));
   };
 
-  const handleStop = (): void => {
-    if (abortController) {
-      abortController.abort();
-      setAbortController(null);
-    }
+  // Stopping cancels the run on the server; closing the stream alone would
+  // let it finish in the background.
+  const handleStop = async (): Promise<void> => {
+    const runId = runIdRef.current;
+    abortRef.current?.abort();
+    if (runId) await cancelRunApi(runId);
+    const convId = currentConversation?.id;
+    resetStreaming();
     setLoading(false);
-    setStreamingContent('');
-    setStreamingThought('');
+    if (convId) {
+      // Give the server a moment to save the partial answer.
+      setTimeout(() => loadConversation(convId, false), 800);
+    }
   };
 
   const handleDeleteFile = async (fileID: string) => {
     if (!currentConversation) return;
-    if (!window.confirm(`Delete this file? It will be removed from this conversation. If not used elsewhere, it will be permanently deleted.`)) return;
+    if (!window.confirm('Delete this file? It will be removed from this conversation. If not used elsewhere, it will be permanently deleted.')) return;
 
     try {
       await deleteConversationFileApi(currentConversation.id, fileID);
-      // Update local state
       setConversationFiles(prev => prev.filter(f => f !== fileID));
-      // Also update messages in currentConversation to remove the attachment visually
-      if (currentConversation.messages) {
-        const updatedMessages = currentConversation.messages.map(msg => ({
-          ...msg,
-          attachments: msg.attachments?.filter(a => a !== fileID)
-        }));
-        setCurrentConversation({ ...currentConversation, messages: updatedMessages });
-      }
+      const updatedMessages = currentConversation.messages.map(msg => ({
+        ...msg,
+        attachments: msg.attachments?.filter(a => a !== fileID),
+      }));
+      setCurrentConversation({ ...currentConversation, messages: updatedMessages });
     } catch (err) {
-      alert('Failed to delete file');
+      alert(err instanceof Error ? err.message : 'Failed to delete file');
     }
   };
 
@@ -660,7 +618,7 @@ export const Chat: React.FC = () => {
                   </div>
                 )}
                 {currentConversation.messages.map((msg, i) => (
-                  <div key={i} className={`message-wrapper ${msg.role}`}>
+                  <div key={msg.id ?? i} className={`message-wrapper ${msg.role}`}>
                     <div className="message-content">
                       <div className="message-icon">
                         {msg.role === 'user' ? <User size={20} /> : <Bot size={20} />}
@@ -679,6 +637,7 @@ export const Chat: React.FC = () => {
                             ))}
                           </div>
                         )}
+                        <FeedbackButtons conversationId={currentConversation.id} message={msg} />
                         </div>
                       </div>
                     </div>
@@ -699,7 +658,7 @@ export const Chat: React.FC = () => {
                 {loading && !streamingContent && !streamingThought && (
                   <div className="loading-message">
                     <Loader2 className="animate-spin" size={20} />
-                    <span>Using {selectedModelName}...</span>
+                    <span>{statusText || `Using ${selectedModelName}...`}</span>
                   </div>
                 )}
                 {loading && streamingThought && !streamingContent && (
@@ -1052,7 +1011,11 @@ export const Chat: React.FC = () => {
         .event-item.search_started { border-left-color: #3b82f6; }
         .event-item.extraction_started { border-left-color: #f59e0b; }
         .event-item.sufficiency_checked { border-left-color: #10b981; }
-        .event-item.grounded_generation_started { border-left-color: #8b5cf6; }
+        .event-item.run_finished { border-left-color: #10b981; }
+        .feedback-row { display: flex; gap: 0.25rem; margin-top: 0.5rem; }
+        .feedback-btn { background: none; border: 1px solid transparent; color: #94a3b8; cursor: pointer; padding: 0.2rem 0.3rem; border-radius: 0.375rem; display: flex; align-items: center; }
+        .feedback-btn:hover { color: #475569; background: #f1f5f9; }
+        .feedback-btn.selected { color: #2563eb; border-color: #bfdbfe; background: #eff6ff; }
       `}</style>
     </div>
   );

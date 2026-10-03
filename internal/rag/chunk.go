@@ -54,8 +54,9 @@ func ChunkText(text string) []string {
 		// A single sentence longer than a chunk is cut by words.
 		for len(words) > maxWords {
 			flush()
-			cur = append(cur, words[:maxWords]...)
-			words = words[maxWords:]
+			n := maxWords - len(cur)
+			cur = append(cur, words[:n]...)
+			words = words[n:]
 		}
 		if len(cur)+len(words) > maxWords {
 			flush()

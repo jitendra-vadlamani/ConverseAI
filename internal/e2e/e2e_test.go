@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"ai-chat/internal/app"
@@ -85,7 +86,8 @@ type env2e struct {
 func start(t *testing.T, cfg *config.Config, llm *testutil.FakeOllama) *env2e {
 	t.Helper()
 	ctx := context.Background()
-	a, err := app.New(ctx, cfg, nil, app.Overrides{Ollama: llm, Search: fakeSearch{}})
+	static := fstest.MapFS{"index.html": {Data: []byte("<!doctype html><title>ConverseAI</title>")}}
+	a, err := app.New(ctx, cfg, static, app.Overrides{Ollama: llm, Search: fakeSearch{}})
 	if err != nil {
 		t.Fatalf("app: %v", err)
 	}
@@ -412,6 +414,13 @@ func TestToolCallingWithCitations(t *testing.T) {
 
 func TestRateLimitAndSecrets(t *testing.T) {
 	e := start(t, testConfig(t), &testutil.FakeOllama{})
+	// SPA routes fall back to index.html; unknown API routes are 404s.
+	for path, want := range map[string]int{"/": 200, "/settings": 200, "/api/nope": 404, "/healthz": 200, "/readyz": 200, "/metrics": 200} {
+		resp, err := http.Get(e.srv.URL + path)
+		if err != nil || resp.StatusCode != want {
+			t.Errorf("GET %s: %v %v, want %d", path, err, resp.StatusCode, want)
+		}
+	}
 	jar, _ := cookiejar.New(nil)
 	u := &user{t: t, base: e.srv.URL, client: &http.Client{Jar: jar}}
 	limited := false

@@ -1,80 +1,149 @@
+# ConverseAI production stack.
+#
+#   cp .env.example .env    # then fill in every secret
+#   docker compose up -d --build
+#   docker compose --profile tls up -d    # adds Caddy for HTTPS
+#   docker compose --profile redis up -d  # adds Redis (set REDIS_URL) for multiple API instances
+#
+# Only the app (and Caddy, if enabled) publish ports. MongoDB, MinIO and
+# Chroma live on an internal network with no host ports and no internet.
+
+x-restart: &restart
+  restart: unless-stopped
+
 services:
   converseai-db:
-    image: mongo:latest
-    container_name: converseai-db
-    networks:
-      - converseai-net
-    ports:
-      - "${HOST_PORT_DB:-27018}:27017"
+    image: mongo:8.0.15
+    <<: *restart
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?set MONGO_USER in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
     volumes:
       - converseai_db_data:/data/db
-    restart: always
+    networks: [backend]
+    healthcheck:
+      # Connect via the container's network address, not localhost: on first
+      # boot the image runs a temporary localhost-only server to create the
+      # root user, which must not count as healthy.
+      test: ["CMD-SHELL", "mongosh --quiet --host \"$$(hostname -i)\" --eval \"db.adminCommand('ping').ok\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   converseai-storage:
-    image: minio/minio:latest
-    container_name: converseai-storage
+    # The upstream minio/minio image is no longer published on Docker Hub;
+    # this is a maintained community build of the same server.
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z}
+    <<: *restart
     command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password123}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
     volumes:
       - converseai_storage_data:/data
-    networks:
-      - converseai-net
-    restart: always
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
 
   converseai-vector:
-    image: chromadb/chroma:latest
-    container_name: converseai-vector
+    image: chromadb/chroma:1.3.5
+    <<: *restart
     volumes:
-      - converseai_vector_data:/index_data
-    ports:
-      - "8000:8000"
-    networks:
-      - converseai-net
-    restart: always
+      - converseai_vector_data:/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "bash", "-c", ":> /dev/tcp/127.0.0.1/8000"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  converseai-redis:
+    image: redis:7.4-alpine
+    profiles: [redis]
+    <<: *restart
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   converseai:
-    build: .
-    container_name: converseai
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    image: converseai:${VERSION:-dev}
+    <<: *restart
     ports:
-      - "${HOST_PORT_APP:-8080}:8080"
+      - "${HOST_BIND:-0.0.0.0}:${HOST_PORT_APP:-8080}:8080"
     environment:
-      - PORT=8080
-      - MONGO_URI=${MONGO_URI:-mongodb://converseai-db:27017}
-      - DB_NAME=${DB_NAME:-ai_chat}
-      - JWT_SECRET=${JWT_SECRET}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-converseai-storage:9000}
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password123}
-      - MINIO_BUCKET=${MINIO_BUCKET:-converseai}
-      - MINIO_USE_SSL=false
-      - CHROMA_URL=${CHROMA_URL:-http://converseai-vector:8000}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
-      - DEFAULT_PLANNER_MODEL=${DEFAULT_PLANNER_MODEL}
-      - DEFAULT_CHAT_MODEL=${DEFAULT_CHAT_MODEL}
-      - DEFAULT_OCR_MODEL=${DEFAULT_OCR_MODEL}
-      - DEFAULT_VISION_MODEL=${DEFAULT_VISION_MODEL}
-      - DEFAULT_CODING_MODEL=${DEFAULT_CODING_MODEL}
-      - DEFAULT_TRANSLATION_MODEL=${DEFAULT_TRANSLATION_MODEL}
+      PORT: "8080"
+      APP_ENV: ${APP_ENV:-production}
+      MONGO_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@converseai-db:27017/?authSource=admin
+      DB_NAME: ${DB_NAME:-ai_chat}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:?set DB_ENCRYPTION_KEY in .env}
+      DB_ENCRYPTION_KEYS_OLD: ${DB_ENCRYPTION_KEYS_OLD:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      MINIO_ENDPOINT: converseai-storage:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET:-converseai}
+      CHROMA_URL: http://converseai-vector:8000
+      REDIS_URL: ${REDIS_URL:-}
+      MAX_NUM_CTX: ${MAX_NUM_CTX:-8192}
+      SINGLE_MODEL_MODE: ${SINGLE_MODEL_MODE:-true}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-2}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      DEFAULT_CHAT_MODEL: ${DEFAULT_CHAT_MODEL:-}
+      DEFAULT_OCR_MODEL: ${DEFAULT_OCR_MODEL:-}
+      DEFAULT_VISION_MODEL: ${DEFAULT_VISION_MODEL:-}
+      DEFAULT_TRANSLATION_MODEL: ${DEFAULT_TRANSLATION_MODEL:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    networks:
-      - converseai-net
+    networks: [backend, frontend]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
     depends_on:
-      - converseai-db
-      - converseai-storage
-      - converseai-vector
+      converseai-db: { condition: service_healthy }
+      converseai-storage: { condition: service_healthy }
+      converseai-vector: { condition: service_healthy }
+
+  caddy:
+    image: caddy:2.10-alpine
+    profiles: [tls]
+    <<: *restart
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CONVERSEAI_DOMAIN: ${CONVERSEAI_DOMAIN:-localhost}
+      CADDY_TLS: ${CADDY_TLS:-internal}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [frontend]
+    depends_on: [converseai]
 
 networks:
-  converseai-net:
-    driver: bridge
+  backend:
+    internal: true
+  frontend: {}
 
 volumes:
   converseai_db_data:
   converseai_storage_data:
   converseai_vector_data:
+  caddy_data:
+  caddy_config:

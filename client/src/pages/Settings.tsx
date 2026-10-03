@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { updatePasswordApi } from '../api/auth';
+import { updatePasswordApi, deleteAccountApi } from '../api/auth';
 import { useAuth } from '../hooks/useAuth';
 import { 
   Lock, 
@@ -24,6 +24,24 @@ export const Settings: React.FC = () => {
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDeleteAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDeleteError('');
+    if (!window.confirm('Permanently delete your account and all of your data?')) return;
+    setDeleting(true);
+    try {
+      await deleteAccountApi(deletePassword);
+      window.location.href = '/login';
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete account');
+      setDeleting(false);
+    }
+  };
+
   const handlePasswordUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -39,8 +57,8 @@ export const Settings: React.FC = () => {
       setOldPassword('');
       setNewPassword('');
       setConfirmPassword('');
-    } catch (err: any) {
-      setError(err.message || 'Failed to update password');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update password');
     } finally {
       setLoading(false);
     }
@@ -96,6 +114,21 @@ export const Settings: React.FC = () => {
                 {loading ? <><Loader2 className="animate-spin" size={18} /> Updating...</> : 'Update Password'}
               </button>
             </form>
+
+            <div className="danger-zone">
+              <h3>Delete account</h3>
+              <p>Permanently deletes your account, every conversation, uploaded file and search index. This cannot be undone.</p>
+              {deleteError && <div className="auth-error"><AlertCircle size={18} /> {deleteError}</div>}
+              <form onSubmit={handleDeleteAccount} style={{ maxWidth: '400px' }}>
+                <div className="form-group">
+                  <label htmlFor="deletePassword">Current Password</label>
+                  <div className="input-wrapper"><Lock className="input-icon" /><input id="deletePassword" type="password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} placeholder="••••••••" required /></div>
+                </div>
+                <button type="submit" disabled={deleting} className="auth-button danger-button">
+                  {deleting ? <><Loader2 className="animate-spin" size={18} /> Deleting...</> : 'Delete my account and data'}
+                </button>
+              </form>
+            </div>
           </div>
         );
     }
@@ -198,6 +231,10 @@ export const Settings: React.FC = () => {
         .empty-state p { margin: 0; font-size: 0.95rem; max-width: 300px; line-height: 1.5; }
         .add-first-btn { background: #6366f1; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 0.75rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 0.5rem; transition: all 0.2s; margin-top: 0.5rem; }
         .add-first-btn:hover { background: #4f46e5; transform: scale(1.02); }
+        .danger-zone { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #fee2e2; }
+        .danger-zone h3 { font-size: 1.1rem; color: #b91c1c; margin-bottom: 0.5rem; }
+        .danger-zone p { color: #64748b; font-size: 0.9rem; margin-bottom: 1rem; max-width: 520px; }
+        .danger-button { background: #dc2626 !important; }
         .loading-state { text-align: center; padding: 2rem; color: #64748b; display: flex; align-items: center; justify-content: center; gap: 0.75rem; }
       `}</style>
     </div>

@@ -27,8 +27,8 @@ export const Register: React.FC = () => {
       // Auto-login after registration
       await login(email, password);
       navigate('/');
-    } catch (err: any) {
-      setError(err.message || 'Failed to register');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to register');
     } finally {
       setLoading(false);
     }

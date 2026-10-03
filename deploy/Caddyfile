@@ -1,0 +1,15 @@
+# TLS in front of ConverseAI (docker compose --profile tls up -d).
+#
+# CONVERSEAI_DOMAIN  the name clients use, e.g. chat.example.com
+# CADDY_TLS          "internal" (default): Caddy's own CA, for LAN-only names;
+#                    or an email address to get a public Let's Encrypt cert
+#                    (needs the domain to resolve publicly and ports 80/443).
+{$CONVERSEAI_DOMAIN:localhost} {
+	tls {$CADDY_TLS:internal}
+	encode zstd gzip
+	reverse_proxy converseai:8080 {
+		# Stream SSE responses immediately.
+		flush_interval -1
+	}
+	header -Server
+}

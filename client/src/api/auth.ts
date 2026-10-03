@@ -52,3 +52,16 @@ export const updatePasswordApi = async (oldPassword: string, newPassword: string
     throw new Error(errorData || 'Failed to update password');
   }
 };
+
+export const deleteAccountApi = async (password: string): Promise<void> => {
+  const response = await fetch('/api/auth/account', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.text();
+    throw new Error(errorData || 'Failed to delete account');
+  }
+};

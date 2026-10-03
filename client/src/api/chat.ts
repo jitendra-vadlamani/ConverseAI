@@ -1,10 +1,11 @@
-
-
 export interface Message {
+  id?: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   reasoning?: string;
   model_name: string;
+  attachments?: string[];
+  run_id?: string;
   token_count?: number;
   is_summarized?: boolean;
   created_at?: string;
@@ -18,8 +19,24 @@ export interface Conversation {
   total_tokens?: number;
   summary?: string;
   summary_token_count?: number;
+  active_run_id?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelInfo {
+  name: string;
+  model_name: string;
+  description?: string;
+  context_window: number;
+  capabilities?: string[];
 }
 
 export interface Evidence {
@@ -30,190 +47,215 @@ export interface Evidence {
   authority_score?: number;
   freshness_score?: number;
   final_score: number;
+  is_conflicting?: boolean;
+  conflict_reason?: string;
 }
 
 export interface ConversationEvent {
   id: string;
   conversation_id: string;
   user_id: string;
+  run_id?: string;
   type: string;
-  payload: any;
+  payload: Record<string, unknown> | null;
   timestamp: string;
 }
 
-export const listConversationsApi = async (): Promise<Conversation[]> => {
-  const response = await fetch('/api/chat/conversations');
-  if (!response.ok) throw new Error('Failed to list conversations');
+async function check(response: Response, fallback: string): Promise<Response> {
+  if (!response.ok) {
+    const text = (await response.text()).trim();
+    throw new Error(text || fallback);
+  }
+  return response;
+}
+
+const jsonHeaders = { 'Content-Type': 'application/json' };
+
+export const listConversationsApi = async (): Promise<ConversationSummary[]> => {
+  const response = await check(await fetch('/api/chat/conversations'), 'Failed to list conversations');
   return response.json();
 };
 
-export const listModelsApi = async (): Promise<any[]> => {
-  const response = await fetch('/api/models');
-  if (!response.ok) throw new Error('Failed to list models');
+export const listModelsApi = async (): Promise<ModelInfo[]> => {
+  const response = await check(await fetch('/api/models'), 'Failed to list models');
   return response.json();
 };
 
 export const createConversationApi = async (title: string): Promise<Conversation> => {
-  const response = await fetch('/api/chat/conversations/create', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title
-    }),
-  });
-  if (!response.ok) throw new Error('Failed to create conversation');
+  const response = await check(
+    await fetch('/api/chat/conversations/create', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ title }) }),
+    'Failed to create conversation',
+  );
   return response.json();
 };
 
 export const getConversationApi = async (id: string): Promise<Conversation> => {
-  const response = await fetch(`/api/chat/conversations/get?id=${id}`);
-  if (!response.ok) throw new Error('Failed to get conversation');
+  const response = await check(await fetch(`/api/chat/conversations/get?id=${encodeURIComponent(id)}`), 'Failed to get conversation');
   return response.json();
 };
 
 export const deleteConversationApi = async (id: string): Promise<void> => {
-  const response = await fetch(`/api/chat/conversations/delete?id=${id}`, {
-    method: 'DELETE',
-  });
-  if (!response.ok) throw new Error('Failed to delete conversation');
+  await check(await fetch(`/api/chat/conversations/delete?id=${encodeURIComponent(id)}`, { method: 'DELETE' }), 'Failed to delete conversation');
 };
 
 export const getEventsApi = async (id: string): Promise<ConversationEvent[]> => {
-  const response = await fetch(`/api/chat/conversations/events?id=${id}`);
-  if (!response.ok) throw new Error('Failed to get events');
-  return response.json();
+  const response = await check(await fetch(`/api/chat/conversations/events?id=${encodeURIComponent(id)}`), 'Failed to get events');
+  return (await response.json()) || [];
 };
 
-export const updateConversationTitleApi = async (id: string, title: string) => {
-  const response = await fetch('/api/chat/conversations/title', {
-    method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${localStorage.getItem('token')}`,
-    },
-    body: JSON.stringify({ id, title }),
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.message || 'Failed to update conversation title');
-  }
+export const updateConversationTitleApi = async (id: string, title: string): Promise<void> => {
+  await check(
+    await fetch('/api/chat/conversations/title', { method: 'PATCH', headers: jsonHeaders, body: JSON.stringify({ id, title }) }),
+    'Failed to update conversation title',
+  );
 };
 
-export const listConversationFilesApi = async (id: string) => {
-  const response = await fetch(`/api/chat/conversations/files?id=${id}`, {
-    headers: {
-      'Authorization': `Bearer ${localStorage.getItem('token')}`,
-    },
-  });
+export const listConversationFilesApi = async (id: string): Promise<string[]> => {
+  const response = await fetch(`/api/chat/conversations/files?id=${encodeURIComponent(id)}`);
   if (!response.ok) return [];
-  return response.json();
+  return (await response.json()) || [];
 };
 
-export const getPresignedUrlApi = async (fileID: string) => {
-  const response = await fetch(`/api/chat/files/presign?fileID=${encodeURIComponent(fileID)}`, {
-    headers: {
-      'Authorization': `Bearer ${localStorage.getItem('token')}`,
-    },
-  });
-  if (!response.ok) throw new Error('Failed to get download URL');
-  const data = await response.json();
-  return data.url;
+export const fileDownloadUrl = (fileID: string): string => `/api/chat/files/download?fileID=${encodeURIComponent(fileID)}`;
+
+export const deleteConversationFileApi = async (id: string, fileID: string): Promise<void> => {
+  await check(
+    await fetch(`/api/chat/conversations/files?id=${encodeURIComponent(id)}&fileID=${encodeURIComponent(fileID)}`, { method: 'DELETE' }),
+    'Failed to delete file',
+  );
 };
 
-export const deleteConversationFileApi = async (id: string, fileID: string) => {
-  const response = await fetch(`/api/chat/conversations/files?id=${id}&fileID=${encodeURIComponent(fileID)}`, {
-    method: 'DELETE',
-    headers: {
-      'Authorization': `Bearer ${localStorage.getItem('token')}`,
-    },
-  });
-  if (!response.ok) throw new Error('Failed to delete file');
+export const cancelRunApi = async (runId: string): Promise<void> => {
+  await fetch(`/api/chat/runs/cancel?id=${encodeURIComponent(runId)}`, { method: 'POST' });
 };
+
+export const submitFeedbackApi = async (conversationId: string, messageId: string, rating: 1 | -1, correction = ''): Promise<void> => {
+  await check(
+    await fetch('/api/chat/feedback', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ conversation_id: conversationId, message_id: messageId, rating, correction }),
+    }),
+    'Failed to send feedback',
+  );
+};
+
+export interface RunHandlers {
+  onRun?: (runId: string) => void;
+  onThought: (text: string) => void;
+  // onAnswer receives the full answer text so far; it is replaced, not
+  // appended, so a server-side reset (retry or resume) is handled for free.
+  onAnswer: (text: string) => void;
+  onStatus?: (text: string) => void;
+  onError: (message: string) => void;
+  onDone: (status: string) => void;
+}
+
+interface StreamPayload {
+  type?: string;
+  text?: string;
+  seq?: number;
+  status?: string;
+  run_id?: string;
+}
+
+// readRunStream parses Server-Sent Events: frames are separated by a blank
+// line and every data line is JSON, so newlines inside the answer are safe.
+async function readRunStream(response: Response, h: RunHandlers): Promise<void> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Streaming is not supported by this browser');
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let answer = '';
+  let finished = false;
+
+  const handleFrame = (frame: string) => {
+    let event = 'message';
+    const data: string[] = [];
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+    }
+    if (data.length === 0) return;
+    let payload: StreamPayload;
+    try {
+      payload = JSON.parse(data.join('\n'));
+    } catch {
+      return;
+    }
+    switch (event) {
+      case 'run':
+        if (payload.run_id) h.onRun?.(payload.run_id);
+        break;
+      case 'delta':
+        answer += payload.text ?? '';
+        h.onAnswer(answer);
+        break;
+      case 'reset':
+        answer = payload.text ?? '';
+        h.onAnswer(answer);
+        break;
+      case 'thought':
+        h.onThought(payload.text ?? '');
+        break;
+      case 'status':
+        h.onStatus?.(payload.text ?? '');
+        break;
+      case 'error':
+        h.onError(payload.text ?? 'The answer failed');
+        break;
+      case 'done':
+        finished = true;
+        h.onDone(payload.status ?? 'succeeded');
+        break;
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      handleFrame(buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 2);
+      if (finished) return;
+    }
+  }
+  if (!finished) throw new Error('Connection closed before the answer finished');
+}
 
 export const streamCompletionApi = async (
   conversationId: string,
   modelName: string,
   content: string,
-  onThought: (thought: string) => void,
-  onChunk: (chunk: string) => void,
-  onEnd: () => void,
-  onError: (err: string) => void,
-  files?: File[],
-  signal?: AbortSignal
-) => {
-  try {
-    let body: any;
-    let headers: Record<string, string> = {};
-
-    if (files && files.length > 0) {
-      const formData = new FormData();
-      formData.append('conversation_id', conversationId);
-      formData.append('model_name', modelName);
-      formData.append('content', content);
-      files.forEach(f => formData.append('files', f));
-      body = formData;
-      // Fetch will automatically set multipart/form-data with the correct boundary
-    } else {
-      headers['Content-Type'] = 'application/json';
-      body = JSON.stringify({ conversation_id: conversationId, model_name: modelName, content });
-    }
-
-    const response = await fetch('/api/chat/completions', {
+  handlers: RunHandlers,
+  files: File[] = [],
+  signal?: AbortSignal,
+): Promise<void> => {
+  let init: RequestInit;
+  if (files.length > 0) {
+    const formData = new FormData();
+    formData.append('conversation_id', conversationId);
+    formData.append('model_name', modelName);
+    formData.append('content', content);
+    files.forEach(f => formData.append('files', f));
+    init = { method: 'POST', body: formData, signal };
+  } else {
+    init = {
       method: 'POST',
-      headers,
-      body,
-      signal
-    });
-
-    if (!response.ok) {
-      throw new Error(await response.text() || 'Failed to start stream');
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('Readable stream not supported');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      let currentEvent = 'message';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        if (trimmed.startsWith('event: ')) {
-          currentEvent = trimmed.substring(7);
-          continue;
-        }
-
-        if (trimmed.startsWith('data: ')) {
-          const data = trimmed.substring(6);
-          if (data === '[DONE]') {
-            onEnd();
-            return;
-          }
-          if (currentEvent === 'thought') {
-            onThought(data);
-          } else if (currentEvent === 'error') {
-            onError(data);
-            return; // Stop stream on error
-          } else {
-            onChunk(data);
-          }
-          // Reset event for next chunk unless explicit event tag
-          if (currentEvent !== 'message') currentEvent = 'message';
-        }
-      }
-    }
-  } catch (err: any) {
-    onError(err.message || 'Stream error');
+      headers: jsonHeaders,
+      body: JSON.stringify({ conversation_id: conversationId, model_name: modelName, content }),
+      signal,
+    };
   }
+  const response = await check(await fetch('/api/chat/completions', init), 'Failed to send message');
+  await readRunStream(response, handlers);
+};
+
+// attachRunApi re-attaches to an answer that is still being generated, for
+// example after a page reload.
+export const attachRunApi = async (runId: string, handlers: RunHandlers, signal?: AbortSignal): Promise<void> => {
+  const response = await check(await fetch(`/api/chat/runs/stream?id=${encodeURIComponent(runId)}`, { signal }), 'Failed to attach to the answer');
+  await readRunStream(response, handlers);
 };

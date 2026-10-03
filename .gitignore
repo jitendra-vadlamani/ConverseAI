@@ -1,14 +1,20 @@
 # Go
+converseai
 ai-chat-app
 ai-chat-app.exe
 *.exe
 *.test
 *.prof
+coverage.out
 
 # React
 client/dist
 client/node_modules
 .DS_Store
+
+# Local data
+backups/
+evals/results/
 
 # ENV
 .env

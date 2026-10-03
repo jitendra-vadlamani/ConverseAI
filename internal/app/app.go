@@ -170,7 +170,7 @@ func New(ctx context.Context, cfg *config.Config, static fs.FS, ov Overrides) (*
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
 	if static != nil {
-		mux.Handle("GET /", spaHandler(static))
+		mux.Handle("/", spaHandler(static))
 	}
 
 	var h http.Handler = mux
@@ -195,6 +195,10 @@ func modelIfKnown(catalog repository.SystemLLMRepository, name string) string {
 func spaHandler(static fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(static))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		if p != "" && p != "index.html" {
 			if f, err := static.Open(p); err == nil {
