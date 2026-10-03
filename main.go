@@ -4,164 +4,192 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
+	"ai-chat/internal/app"
 	"ai-chat/internal/config"
-	"ai-chat/internal/database"
-	"ai-chat/internal/handler"
-	"ai-chat/internal/middleware"
-	"ai-chat/internal/ollama"
-	"ai-chat/internal/orchestrator"
-	"ai-chat/internal/manager"
-	"ai-chat/internal/repository"
-	"ai-chat/internal/service"
-	"ai-chat/internal/storage"
-	"ai-chat/internal/events"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"ai-chat/internal/model"
+	"ai-chat/internal/tracing"
 )
 
 //go:embed all:client/dist
 var staticContent embed.FS
 
+var version = "dev"
+
+const usage = `usage: converseai [command]
+
+commands:
+  serve            run the HTTP server (default)
+  rotate-keys      re-encrypt stored data with DB_ENCRYPTION_KEY; old keys go in DB_ENCRYPTION_KEYS_OLD
+  export-feedback  print thumbs-down answers (with corrections) as JSONL eval candidates
+`
+
 func main() {
-	// Initialize Config
-	cfg := config.LoadConfig()
-
-	// Initialize Database
-	db, err := database.NewDatabase(cfg)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+	cmd := "serve"
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
 	}
-
-	// 1. Initialize Base Clients & Repositories
-	ollamaClient := ollama.NewClient()
-	modelManager := manager.NewModelManager(ollamaClient)
-
-	// Initialize Storage
-	storageService, err := storage.NewStorageService(cfg.MinioEndpoint, cfg.MinioUser, cfg.MinioPass, cfg.MinioBucket, cfg.MinioSSL)
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("Failed to initialize storage: %v", err)
+		fmt.Fprintf(os.Stderr, "configuration error:\n%v\n", err)
+		os.Exit(2)
 	}
+	setupLogging(cfg)
 
-	userRepo := repository.NewUserRepository(db.DB)
-	systemLLMRepo := repository.NewSystemLLMRepository()
-	chatRepo := repository.NewChatRepository(db.DB, cfg.DBEncryptionKey)
-	eventRepo := repository.NewEventRepository(db.DB)
-	eventBroker := events.NewEventBroker()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	// One-time Setup: TTL Index for Events (30 days)
-	_, _ = db.DB.Collection("events").Indexes().CreateOne(context.Background(), mongo.IndexModel{
-		Keys:    bson.M{"timestamp": 1},
-		Options: options.Index().SetExpireAfterSeconds(30 * 24 * 60 * 60),
-	})
+	switch cmd {
+	case "serve":
+		err = serve(ctx, cfg)
+	case "rotate-keys":
+		err = rotateKeys(ctx, cfg)
+	case "export-feedback":
+		err = exportFeedback(ctx, cfg)
+	default:
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
+	if err != nil {
+		slog.Error(cmd+" failed", "err", err)
+		os.Exit(1)
+	}
+}
 
-	// 2. Initialize Services First (Needed by Orchestrator)
-	authService := service.NewAuthService(userRepo, cfg)
-	ragService := service.NewRagService(cfg, ollamaClient)
-	searchService := service.NewSearchService()
+func setupLogging(cfg *config.Config) {
+	var h slog.Handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	if cfg.IsDevelopment() {
+		h = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
+	}
+	slog.SetDefault(slog.New(h))
+}
 
-	// 3. Initialize Orchestrator
-	planner := orchestrator.NewPlanner(ollamaClient, modelManager, systemLLMRepo, cfg)
-	validator := orchestrator.NewValidator(systemLLMRepo)
-	executor := orchestrator.NewExecutor(ollamaClient, modelManager, storageService, eventRepo, eventBroker, systemLLMRepo, ragService, searchService)
-	orch := orchestrator.NewOrchestrator(planner, validator, executor, eventRepo, eventBroker)
-
-	chatService := service.NewChatService(chatRepo, systemLLMRepo, ollamaClient, modelManager, orch, planner, storageService, eventRepo, eventBroker, ragService, cfg)
-
-	// 4. Initialize Handlers
-	authHandler := handler.NewAuthHandler(authService)
-	chatHandler := handler.NewChatHandler(chatService, storageService, eventBroker)
-	orchHandler := handler.NewOrchestratorHandler(orch)
-
-	// 5. Setup Routes
-	mw := middleware.NewMiddleware(authService)
-	mux := http.NewServeMux()
-
-	// API Routes
-	mux.HandleFunc("/api/auth/register", authHandler.Register)
-	mux.HandleFunc("/api/auth/login", authHandler.Login)
-	mux.HandleFunc("/api/auth/me", mw.JWTMiddleware(authHandler.Me))
-	mux.HandleFunc("/api/auth/logout", authHandler.Logout)
-	mux.HandleFunc("/api/auth/password", mw.JWTMiddleware(authHandler.UpdatePassword))
-
-	mux.HandleFunc("/api/chat/conversations", mw.JWTMiddleware(chatHandler.ListConversations))
-	mux.HandleFunc("/api/models", mw.JWTMiddleware(chatHandler.ListModels))
-	mux.HandleFunc("/api/chat/conversations/get", mw.JWTMiddleware(chatHandler.GetConversation))
-	mux.HandleFunc("/api/chat/conversations/create", mw.JWTMiddleware(chatHandler.CreateConversation))
-	mux.HandleFunc("/api/chat/conversations/delete", mw.JWTMiddleware(chatHandler.DeleteConversation))
-	mux.HandleFunc("/api/chat/conversations/title", mw.JWTMiddleware(chatHandler.UpdateConversationTitle))
-	mux.HandleFunc("/api/chat/conversations/files", mw.JWTMiddleware(chatHandler.DeleteConversationFile)) // DELETE method handled in handler
-	mux.HandleFunc("/api/chat/files/presign", mw.JWTMiddleware(chatHandler.GetFilePresignedURL))
-	mux.HandleFunc("/api/chat/conversations/events", mw.JWTMiddleware(chatHandler.GetEvents))
-	mux.HandleFunc("/api/chat/conversations/events/stream", mw.JWTMiddleware(chatHandler.StreamEvents))
-	mux.HandleFunc("/api/chat/completions", mw.JWTMiddleware(chatHandler.StreamCompletion))
-
-	mux.HandleFunc("/api/orchestrate", mw.JWTMiddleware(orchHandler.Orchestrate))
-
-	mux.HandleFunc("/api/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"message": "Hello from Go Backend!"})
-	})
-
-	// Static File Serving
+func serve(ctx context.Context, cfg *config.Config) error {
+	shutdownTracing, err := tracing.Setup(ctx, cfg.OTLPEndpoint, version)
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
 	dist, err := fs.Sub(staticContent, "client/dist")
-	if err != nil { log.Fatal(err) }
-	fileServer := http.FileServer(http.FS(dist))
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := filepath.Clean(r.URL.Path)
-		if _, err := dist.Open(path[1:]); err == nil {
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		indexHTML, _ := fs.ReadFile(dist, "index.html")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexHTML)
-	})
-
-	// Graceful Shutdown
-	server := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: middleware.Logger(mux),
+	if err != nil {
+		return err
+	}
+	a, err := app.New(ctx, cfg, dist, app.Overrides{})
+	if err != nil {
+		return err
 	}
 
-	// Start server in a goroutine
+	server := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           a.Handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute, // uploads
+		WriteTimeout:      2 * time.Minute, // SSE handlers lift this per request
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
+
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	go a.Runs.Background(bgCtx)
+
+	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("Server starting on :%s", cfg.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
-		}
+		slog.Info("server starting", "port", cfg.Port, "version", version)
+		errCh <- server.ListenAndServe()
 	}()
 
-	// Wait for interrupt signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	select {
+	case err := <-errCh:
+		bgCancel()
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-ctx.Done():
+	}
 
-	log.Println("Shutting down server...")
-
-	// Give active connections 10 seconds to drain
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	slog.Info("shutting down")
+	bgCancel()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
+	// Stop runs first so open streams end with their saved state, then
+	// drain HTTP.
+	a.Runs.Shutdown(shutdownCtx)
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
+		slog.Warn("http shutdown", "err", err)
 	}
+	a.Close(shutdownCtx)
+	_ = shutdownTracing(shutdownCtx)
+	slog.Info("server stopped")
+	return nil
+}
 
-	// Disconnect MongoDB
-	if err := db.Client.Disconnect(shutdownCtx); err != nil {
-		log.Printf("MongoDB disconnect error: %v", err)
+func rotateKeys(ctx context.Context, cfg *config.Config) error {
+	db, repos, err := app.OpenRepos(ctx, cfg)
+	if err != nil {
+		return err
 	}
+	defer db.Client.Disconnect(context.Background())
+	for name, rotate := range map[string]func(context.Context) (int, error){
+		"conversations": repos.Chats.RotateKeys,
+		"events":        repos.Events.RotateKeys,
+		"runs":          repos.Runs.RotateKeys,
+		"feedback":      repos.Feedback.RotateKeys,
+	} {
+		n, err := rotate(ctx)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		slog.Info("re-encrypted", "collection", name, "documents", n)
+	}
+	slog.Info("key rotation complete; DB_ENCRYPTION_KEYS_OLD can now be removed")
+	return nil
+}
 
-	log.Println("Server exited gracefully")
+// exportFeedback writes each thumbs-down answer as a candidate golden-set
+// case. A human reviews them before adding to evals/golden.jsonl.
+func exportFeedback(ctx context.Context, cfg *config.Config) error {
+	db, repos, err := app.OpenRepos(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer db.Client.Disconnect(context.Background())
+	items, err := repos.Feedback.ListNegative(ctx, 500)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(os.Stdout)
+	for _, fb := range items {
+		conv, err := repos.Chats.GetConversation(ctx, fb.ConversationID)
+		if err != nil {
+			continue
+		}
+		var question, answer string
+		for i, m := range conv.Messages {
+			if m.ID == fb.MessageID {
+				answer = m.Content
+				for j := i - 1; j >= 0; j-- {
+					if conv.Messages[j].Role == model.RoleUser {
+						question = conv.Messages[j].Content
+						break
+					}
+				}
+			}
+		}
+		if question == "" {
+			continue
+		}
+		_ = enc.Encode(map[string]any{
+			"id": "feedback-" + fb.MessageID.Hex(), "category": "feedback", "question": question,
+			"bad_answer": answer, "correction": fb.Correction, "run_id": fb.RunID.Hex(),
+		})
+	}
+	return nil
 }

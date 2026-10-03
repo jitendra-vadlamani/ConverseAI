@@ -2,268 +2,319 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"ai-chat/internal/model"
+	"ai-chat/internal/util"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-
-	"ai-chat/internal/util"
 )
 
+const undecryptable = "[this content was encrypted with a key that is no longer configured]"
+
 type ChatRepository interface {
-	CreateConversation(ctx context.Context, conversation *model.Conversation) (*model.Conversation, error)
-	GetConversationByID(ctx context.Context, id primitive.ObjectID) (*model.Conversation, error)
-	GetConversationsByUserID(ctx context.Context, userID primitive.ObjectID) ([]*model.Conversation, error)
-	AddMessage(ctx context.Context, conversationID primitive.ObjectID, message model.Message) error
-	UpdateTotalTokens(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
-	UpdateSummary(ctx context.Context, conversationID primitive.ObjectID, summary string, tokens int) error
-	MarkMessagesAsSummarized(ctx context.Context, conversationID primitive.ObjectID) error
-	UpdateLastMessageTokenCount(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
+	CreateConversation(ctx context.Context, userID primitive.ObjectID, title string) (*model.Conversation, error)
+	// GetConversation loads a conversation by id only. Handlers must use
+	// GetOwnedConversation; this is for background jobs that already know
+	// the owner.
+	GetConversation(ctx context.Context, id primitive.ObjectID) (*model.Conversation, error)
+	GetOwnedConversation(ctx context.Context, id, userID primitive.ObjectID) (*model.Conversation, error)
+	ListConversations(ctx context.Context, userID primitive.ObjectID) ([]model.ConversationSummary, error)
+	AddMessage(ctx context.Context, conversationID primitive.ObjectID, msg model.Message) (primitive.ObjectID, error)
+	SetMessageTokenCount(ctx context.Context, conversationID, messageID primitive.ObjectID, tokens int) error
 	SetTotalTokens(ctx context.Context, conversationID primitive.ObjectID, tokens int) error
-	UpdateConversationTitle(ctx context.Context, id primitive.ObjectID, title string) error
+	// SetSummary stores the summary and marks every message created at or
+	// before cutoff as summarized.
+	SetSummary(ctx context.Context, conversationID primitive.ObjectID, summary string, tokens int, cutoff time.Time) error
+	UpdateTitle(ctx context.Context, id, userID primitive.ObjectID, title string) error
 	DeleteConversation(ctx context.Context, id primitive.ObjectID) error
+	DeleteByUser(ctx context.Context, userID primitive.ObjectID) error
 	RemoveFileFromConversation(ctx context.Context, conversationID primitive.ObjectID, fileID string) error
 	CountFileReferences(ctx context.Context, userID primitive.ObjectID, fileID string) (int64, error)
+	// ClaimActiveRun sets the conversation's active run if none is set.
+	// It returns ErrConflict if another run is already active.
+	ClaimActiveRun(ctx context.Context, conversationID, userID, runID primitive.ObjectID) error
+	ClearActiveRun(ctx context.Context, conversationID, runID primitive.ObjectID) error
+	// RotateKeys re-encrypts every field not encrypted with the primary key.
+	RotateKeys(ctx context.Context) (int, error)
 }
 
 type MongoChatRepository struct {
 	collection *mongo.Collection
-	dbKey      string
+	keys       *util.KeyRing
 }
 
-func NewChatRepository(db *mongo.Database, dbKey string) ChatRepository {
-	return &MongoChatRepository{
-		collection: db.Collection("conversations"),
-		dbKey:      dbKey,
-	}
+func NewChatRepository(db *mongo.Database, keys *util.KeyRing) ChatRepository {
+	return &MongoChatRepository{collection: db.Collection("conversations"), keys: keys}
 }
 
-func (r *MongoChatRepository) CreateConversation(ctx context.Context, conv *model.Conversation) (*model.Conversation, error) {
-	conv.ID = primitive.NewObjectID()
-	conv.CreatedAt = time.Now()
-	conv.UpdatedAt = time.Now()
-	if conv.Messages == nil {
-		conv.Messages = []model.Message{}
-	}
-
-	_, err := r.collection.InsertOne(ctx, conv)
+func (r *MongoChatRepository) encrypt(s string) (string, error) {
+	enc, err := r.keys.Encrypt(s)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create conversation: %w", err)
+		return "", fmt.Errorf("encrypt field: %w", err)
 	}
+	return enc, nil
+}
+
+func (r *MongoChatRepository) decrypt(s string) string {
+	pt, err := r.keys.Decrypt(s)
+	if err != nil {
+		slog.Error("decrypt conversation field", "err", err)
+		return undecryptable
+	}
+	return pt
+}
+
+func (r *MongoChatRepository) decryptConversation(c *model.Conversation) {
+	c.Title = r.decrypt(c.Title)
+	c.Summary = r.decrypt(c.Summary)
+	for i := range c.Messages {
+		c.Messages[i].Content = r.decrypt(c.Messages[i].Content)
+		c.Messages[i].Reasoning = r.decrypt(c.Messages[i].Reasoning)
+	}
+}
+
+func (r *MongoChatRepository) CreateConversation(ctx context.Context, userID primitive.ObjectID, title string) (*model.Conversation, error) {
+	encTitle, err := r.encrypt(title)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	conv := &model.Conversation{
+		ID: primitive.NewObjectID(), UserID: userID, Title: encTitle,
+		Messages: []model.Message{}, CreatedAt: now, UpdatedAt: now,
+	}
+	if _, err := r.collection.InsertOne(ctx, conv); err != nil {
+		return nil, fmt.Errorf("create conversation: %w", err)
+	}
+	conv.Title = title
 	return conv, nil
 }
 
-func (r *MongoChatRepository) GetConversationByID(ctx context.Context, id primitive.ObjectID) (*model.Conversation, error) {
+func (r *MongoChatRepository) GetConversation(ctx context.Context, id primitive.ObjectID) (*model.Conversation, error) {
+	return r.findOne(ctx, bson.M{"_id": id})
+}
+
+func (r *MongoChatRepository) GetOwnedConversation(ctx context.Context, id, userID primitive.ObjectID) (*model.Conversation, error) {
+	return r.findOne(ctx, bson.M{"_id": id, "user_id": userID})
+}
+
+func (r *MongoChatRepository) findOne(ctx context.Context, filter bson.M) (*model.Conversation, error) {
 	var conv model.Conversation
-	err := r.collection.FindOne(ctx, bson.M{"_id": id}).Decode(&conv)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, nil
+	if err := r.collection.FindOne(ctx, filter).Decode(&conv); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("failed to get conversation: %w", err)
+		return nil, fmt.Errorf("get conversation: %w", err)
 	}
-
-	// Decrypt sensitive fields
-	if conv.Summary != "" {
-		conv.Summary, _ = util.DecryptString(conv.Summary, r.dbKey)
-	}
-	for i := range conv.Messages {
-		conv.Messages[i].Content, _ = util.DecryptString(conv.Messages[i].Content, r.dbKey)
-		conv.Messages[i].Reasoning, _ = util.DecryptString(conv.Messages[i].Reasoning, r.dbKey)
-	}
-
+	r.decryptConversation(&conv)
 	return &conv, nil
 }
 
-func (r *MongoChatRepository) GetConversationsByUserID(ctx context.Context, userID primitive.ObjectID) ([]*model.Conversation, error) {
-	opts := options.Find().SetSort(bson.M{"updated_at": -1})
+func (r *MongoChatRepository) ListConversations(ctx context.Context, userID primitive.ObjectID) ([]model.ConversationSummary, error) {
+	opts := options.Find().
+		SetSort(bson.D{{Key: "updated_at", Value: -1}}).
+		SetProjection(bson.M{"_id": 1, "title": 1, "created_at": 1, "updated_at": 1})
 	cursor, err := r.collection.Find(ctx, bson.M{"user_id": userID}, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list conversations: %w", err)
+		return nil, fmt.Errorf("list conversations: %w", err)
 	}
-	defer cursor.Close(ctx)
-
-	conversations := []*model.Conversation{}
-	if err := cursor.All(ctx, &conversations); err != nil {
-		return nil, fmt.Errorf("failed to decode conversations: %w", err)
+	out := []model.ConversationSummary{}
+	if err := cursor.All(ctx, &out); err != nil {
+		return nil, fmt.Errorf("decode conversations: %w", err)
 	}
-
-	// Decrypt sensitive fields
-	for _, conv := range conversations {
-		if conv.Summary != "" {
-			conv.Summary, _ = util.DecryptString(conv.Summary, r.dbKey)
-		}
-		for i := range conv.Messages {
-			conv.Messages[i].Content, _ = util.DecryptString(conv.Messages[i].Content, r.dbKey)
-			conv.Messages[i].Reasoning, _ = util.DecryptString(conv.Messages[i].Reasoning, r.dbKey)
-		}
+	for i := range out {
+		out[i].Title = r.decrypt(out[i].Title)
 	}
-
-	return conversations, nil
+	return out, nil
 }
 
-func (r *MongoChatRepository) AddMessage(ctx context.Context, conversationID primitive.ObjectID, msg model.Message) error {
-	msg.CreatedAt = time.Now()
-	
-	// Encrypt sensitive fields before saving
-	if enc, err := util.EncryptString(msg.Content, r.dbKey); err == nil {
-		msg.Content = enc
+func (r *MongoChatRepository) AddMessage(ctx context.Context, conversationID primitive.ObjectID, msg model.Message) (primitive.ObjectID, error) {
+	if msg.ID.IsZero() {
+		msg.ID = primitive.NewObjectID()
 	}
-	if enc, err := util.EncryptString(msg.Reasoning, r.dbKey); err == nil {
-		msg.Reasoning = enc
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now()
 	}
-
-	update := bson.M{
+	var err error
+	if msg.Content, err = r.encrypt(msg.Content); err != nil {
+		return primitive.NilObjectID, err
+	}
+	if msg.Reasoning, err = r.encrypt(msg.Reasoning); err != nil {
+		return primitive.NilObjectID, err
+	}
+	res, err := r.collection.UpdateOne(ctx, bson.M{"_id": conversationID}, bson.M{
 		"$push": bson.M{"messages": msg},
 		"$set":  bson.M{"updated_at": time.Now()},
-	}
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": conversationID}, update)
+	})
 	if err != nil {
-		return fmt.Errorf("failed to add message: %w", err)
+		return primitive.NilObjectID, fmt.Errorf("add message: %w", err)
 	}
-	return nil
+	if res.MatchedCount == 0 {
+		return primitive.NilObjectID, ErrNotFound
+	}
+	return msg.ID, nil
 }
 
-func (r *MongoChatRepository) UpdateTotalTokens(ctx context.Context, id primitive.ObjectID, tokens int) error {
-	update := bson.M{
-		"$inc": bson.M{"total_tokens": tokens},
-		"$set": bson.M{"updated_at": time.Now()},
-	}
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
-	if err != nil {
-		return fmt.Errorf("failed to update total tokens: %w", err)
-	}
-	return nil
-}
-
-func (r *MongoChatRepository) UpdateSummary(ctx context.Context, id primitive.ObjectID, summary string, tokens int) error {
-	// Encrypt summary before saving
-	if enc, err := util.EncryptString(summary, r.dbKey); err == nil {
-		summary = enc
-	}
-
-	update := bson.M{
-		"$set": bson.M{
-			"summary":             summary,
-			"summary_token_count": tokens,
-			"updated_at":          time.Now(),
-		},
-	}
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
-	if err != nil {
-		return fmt.Errorf("failed to update summary: %w", err)
-	}
-	return nil
-}
-
-func (r *MongoChatRepository) MarkMessagesAsSummarized(ctx context.Context, id primitive.ObjectID) error {
-	update := bson.M{
-		"$set": bson.M{
-			"messages.$[].is_summarized": true,
-			"updated_at":                 time.Now(),
-		},
-	}
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
-	if err != nil {
-		return fmt.Errorf("failed to mark messages as summarized: %w", err)
-	}
-	return nil
-}
-
-func (r *MongoChatRepository) UpdateLastMessageTokenCount(ctx context.Context, id primitive.ObjectID, tokens int) error {
-	// We use the aggregation framework to find the last message index and update it
-	// But simpler: just use index -1 if we can't reliably know the index without fetching.
-	// Actually, in Mongo 4.4+, we can use $[] with filters or $[] with positional-last if we had one.
-	// For simplicity in this demo, let's just fetch and update unless we want to use a more complex query.
-	// Alternative: Use a pipeline update (Mongo 4.2+)
-	
-	update := []bson.M{
-		{
-			"$set": bson.M{
-				"messages": bson.M{
-					"$concatArrays": []interface{}{
-						bson.M{"$slice": []interface{}{"$messages", bson.M{"$subtract": []interface{}{bson.M{"$size": "$messages"}, 1}}}},
-						[]bson.M{
-							{
-								"$mergeObjects": []interface{}{
-									bson.M{"$arrayElemAt": []interface{}{"$messages", -1}},
-									bson.M{"token_count": tokens},
-								},
-							},
-						},
-					},
-				},
-				"updated_at": time.Now(),
-			},
-		},
-	}
-	
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+func (r *MongoChatRepository) SetMessageTokenCount(ctx context.Context, conversationID, messageID primitive.ObjectID, tokens int) error {
+	_, err := r.collection.UpdateOne(ctx,
+		bson.M{"_id": conversationID, "messages.id": messageID},
+		bson.M{"$set": bson.M{"messages.$.token_count": tokens}})
 	return err
 }
 
 func (r *MongoChatRepository) SetTotalTokens(ctx context.Context, id primitive.ObjectID, tokens int) error {
-	update := bson.M{
-		"$set": bson.M{
-			"total_tokens": tokens,
-			"updated_at":   time.Now(),
-		},
-	}
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"total_tokens": tokens}})
+	return err
+}
+
+func (r *MongoChatRepository) SetSummary(ctx context.Context, id primitive.ObjectID, summary string, tokens int, cutoff time.Time) error {
+	enc, err := r.encrypt(summary)
 	if err != nil {
-		return fmt.Errorf("failed to set total tokens: %w", err)
+		return err
+	}
+	_, err = r.collection.UpdateOne(ctx, bson.M{"_id": id},
+		bson.M{"$set": bson.M{
+			"summary":                       enc,
+			"summary_token_count":           tokens,
+			"messages.$[old].is_summarized": true,
+			"updated_at":                    time.Now(),
+		}},
+		options.Update().SetArrayFilters(options.ArrayFilters{
+			Filters: []any{bson.M{"old.created_at": bson.M{"$lte": cutoff}}},
+		}))
+	if err != nil {
+		return fmt.Errorf("set summary: %w", err)
 	}
 	return nil
 }
 
-func (r *MongoChatRepository) UpdateConversationTitle(ctx context.Context, id primitive.ObjectID, title string) error {
-	update := bson.M{
-		"$set": bson.M{
-			"title":      title,
-			"updated_at": time.Now(),
-		},
-	}
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+func (r *MongoChatRepository) UpdateTitle(ctx context.Context, id, userID primitive.ObjectID, title string) error {
+	enc, err := r.encrypt(title)
 	if err != nil {
-		return fmt.Errorf("failed to update conversation title: %w", err)
+		return err
+	}
+	res, err := r.collection.UpdateOne(ctx, bson.M{"_id": id, "user_id": userID},
+		bson.M{"$set": bson.M{"title": enc, "updated_at": time.Now()}})
+	if err != nil {
+		return fmt.Errorf("update title: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
 
 func (r *MongoChatRepository) DeleteConversation(ctx context.Context, id primitive.ObjectID) error {
-	_, err := r.collection.DeleteOne(ctx, bson.M{"_id": id})
-	if err != nil {
-		return fmt.Errorf("failed to delete conversation: %w", err)
+	if _, err := r.collection.DeleteOne(ctx, bson.M{"_id": id}); err != nil {
+		return fmt.Errorf("delete conversation: %w", err)
 	}
 	return nil
 }
 
+func (r *MongoChatRepository) DeleteByUser(ctx context.Context, userID primitive.ObjectID) error {
+	_, err := r.collection.DeleteMany(ctx, bson.M{"user_id": userID})
+	return err
+}
+
 func (r *MongoChatRepository) RemoveFileFromConversation(ctx context.Context, id primitive.ObjectID, fileID string) error {
-	// Remove fileID from the "attachments" array in all messages of the conversation
-	update := bson.M{
+	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
 		"$pull": bson.M{"messages.$[].attachments": fileID},
 		"$set":  bson.M{"updated_at": time.Now()},
-	}
-	_, err := r.collection.UpdateOne(ctx, bson.M{"_id": id}, update)
+	})
 	if err != nil {
-		return fmt.Errorf("failed to remove file from conversation: %w", err)
+		return fmt.Errorf("remove file from conversation: %w", err)
 	}
 	return nil
 }
 
 func (r *MongoChatRepository) CountFileReferences(ctx context.Context, userID primitive.ObjectID, fileID string) (int64, error) {
-	// Count how many conversations for this user contain at least one message with this fileID in its attachments
-	filter := bson.M{
-		"user_id":              userID,
-		"messages.attachments": fileID,
-	}
-	count, err := r.collection.CountDocuments(ctx, filter)
+	count, err := r.collection.CountDocuments(ctx, bson.M{"user_id": userID, "messages.attachments": fileID})
 	if err != nil {
-		return 0, fmt.Errorf("failed to count file references: %w", err)
+		return 0, fmt.Errorf("count file references: %w", err)
 	}
 	return count, nil
+}
+
+func (r *MongoChatRepository) ClaimActiveRun(ctx context.Context, conversationID, userID, runID primitive.ObjectID) error {
+	res, err := r.collection.UpdateOne(ctx,
+		bson.M{"_id": conversationID, "user_id": userID, "active_run_id": bson.M{"$exists": false}},
+		bson.M{"$set": bson.M{"active_run_id": runID, "updated_at": time.Now()}})
+	if err != nil {
+		return fmt.Errorf("claim active run: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (r *MongoChatRepository) ClearActiveRun(ctx context.Context, conversationID, runID primitive.ObjectID) error {
+	_, err := r.collection.UpdateOne(ctx,
+		bson.M{"_id": conversationID, "active_run_id": runID},
+		bson.M{"$unset": bson.M{"active_run_id": ""}})
+	return err
+}
+
+func (r *MongoChatRepository) RotateKeys(ctx context.Context) (int, error) {
+	cursor, err := r.collection.Find(ctx, bson.M{})
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+	updated := 0
+	for cursor.Next(ctx) {
+		var conv model.Conversation
+		if err := cursor.Decode(&conv); err != nil {
+			return updated, err
+		}
+		set := bson.M{}
+		rotate := func(field, value string) error {
+			if !r.keys.NeedsRotation(value) {
+				return nil
+			}
+			pt, err := r.keys.Decrypt(value)
+			if err != nil {
+				return fmt.Errorf("conversation %s %s: %w", conv.ID.Hex(), field, err)
+			}
+			enc, err := r.encrypt(pt)
+			if err != nil {
+				return err
+			}
+			set[field] = enc
+			return nil
+		}
+		if err := rotate("title", conv.Title); err != nil {
+			return updated, err
+		}
+		if err := rotate("summary", conv.Summary); err != nil {
+			return updated, err
+		}
+		for i, m := range conv.Messages {
+			if err := rotate(fmt.Sprintf("messages.%d.content", i), m.Content); err != nil {
+				return updated, err
+			}
+			if err := rotate(fmt.Sprintf("messages.%d.reasoning", i), m.Reasoning); err != nil {
+				return updated, err
+			}
+		}
+		if len(set) == 0 {
+			continue
+		}
+		// Guard on message count so a message appended concurrently can't be
+		// overwritten by a stale positional index.
+		if _, err := r.collection.UpdateOne(ctx,
+			bson.M{"_id": conv.ID, "messages": bson.M{"$size": len(conv.Messages)}},
+			bson.M{"$set": set}); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, cursor.Err()
 }

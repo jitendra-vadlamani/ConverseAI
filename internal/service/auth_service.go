@@ -4,16 +4,41 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
-	"ai-chat/internal/config"
 	"ai-chat/internal/model"
 	"ai-chat/internal/repository"
+
 	"github.com/golang-jwt/jwt/v5"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/crypto/bcrypt"
 )
+
+const (
+	minPasswordLen = 8
+	maxPasswordLen = 72 // bcrypt ignores everything past 72 bytes
+)
+
+// Errors with a user-facing meaning; handlers map them to status codes.
+var (
+	ErrInvalidInput       = errors.New("invalid input")
+	ErrEmailTaken         = errors.New("an account with this email already exists")
+	ErrInvalidCredentials = errors.New("invalid email or password")
+	ErrNotFound           = errors.New("not found")
+	ErrConflict           = errors.New("conflict")
+)
+
+// ValidationError carries a message that is safe to show to the user.
+type ValidationError struct{ Msg string }
+
+func (e *ValidationError) Error() string { return e.Msg }
+func (e *ValidationError) Unwrap() error { return ErrInvalidInput }
+
+func invalid(format string, args ...any) error {
+	return &ValidationError{Msg: fmt.Sprintf(format, args...)}
+}
 
 type AuthService interface {
 	Register(ctx context.Context, email, password string) (*model.User, error)
@@ -21,121 +46,135 @@ type AuthService interface {
 	VerifyToken(tokenString string) (string, error)
 	GetUserByID(ctx context.Context, id string) (*model.User, error)
 	UpdatePassword(ctx context.Context, userID, oldPassword, newPassword string) error
+	// CheckPassword verifies the current password (for destructive actions).
+	CheckPassword(ctx context.Context, userID, password string) error
 }
 
 type authService struct {
 	repo      repository.UserRepository
 	jwtSecret []byte
+	ttl       time.Duration
+	dummyHash []byte
 }
 
-func NewAuthService(repo repository.UserRepository, cfg *config.Config) AuthService {
-	return &authService{
-		repo:      repo,
-		jwtSecret: []byte(cfg.JWTSecret),
+func NewAuthService(repo repository.UserRepository, jwtSecret string, ttl time.Duration) AuthService {
+	// Comparing against a dummy hash when the user doesn't exist keeps login
+	// timing the same for known and unknown emails.
+	dummy, _ := bcrypt.GenerateFromPassword([]byte("timing-equaliser"), bcrypt.DefaultCost)
+	return &authService{repo: repo, jwtSecret: []byte(jwtSecret), ttl: ttl, dummyHash: dummy}
+}
+
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func validatePassword(pw string) error {
+	if len(pw) < minPasswordLen {
+		return invalid("password must be at least %d characters", minPasswordLen)
 	}
+	if len(pw) > maxPasswordLen {
+		return invalid("password must be at most %d bytes", maxPasswordLen)
+	}
+	return nil
 }
 
 func (s *authService) Register(ctx context.Context, email, password string) (*model.User, error) {
-	// Input validation
-	email = strings.TrimSpace(email)
-	if email == "" || !strings.Contains(email, "@") || !strings.Contains(email, ".") {
-		return nil, errors.New("invalid email address")
+	email = NormalizeEmail(email)
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email || !strings.Contains(email[strings.LastIndex(email, "@"):], ".") || len(email) > 254 {
+		return nil, invalid("invalid email address")
 	}
-	if len(password) < 8 {
-		return nil, errors.New("password must be at least 8 characters")
+	if err := validatePassword(password); err != nil {
+		return nil, err
 	}
-
-	// Check if user already exists
-	existingUser, _ := s.repo.GetByEmail(ctx, email)
-	if existingUser != nil {
-		return nil, errors.New("user already exists")
-	}
-
-	// Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, fmt.Errorf("failed to hash password: %w", err)
+		return nil, fmt.Errorf("hash password: %w", err)
 	}
-
-	// Create user
-	return s.repo.Create(ctx, email, string(hashedPassword))
+	user, err := s.repo.Create(ctx, email, string(hash))
+	if errors.Is(err, repository.ErrConflict) {
+		return nil, ErrEmailTaken
+	}
+	return user, err
 }
 
 func (s *authService) Login(ctx context.Context, email, password string) (*model.User, string, error) {
-	user, err := s.repo.GetByEmail(ctx, email)
-	if err != nil || user == nil {
-		return nil, "", errors.New("invalid email or password")
+	user, err := s.repo.GetByEmail(ctx, NormalizeEmail(email))
+	if errors.Is(err, repository.ErrNotFound) {
+		_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(password))
+		return nil, "", ErrInvalidCredentials
 	}
-
-	// Check password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return nil, "", errors.New("invalid email or password")
+	if err != nil {
+		return nil, "", err
 	}
-
-	// Generate JWT
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return nil, "", ErrInvalidCredentials
+	}
+	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub": user.ID.Hex(),
-		"exp": time.Now().Add(time.Hour * 24).Unix(),
+		"iat": now.Unix(),
+		"exp": now.Add(s.ttl).Unix(),
 	})
-
-	tokenString, err := token.SignedString(s.jwtSecret)
+	signed, err := token.SignedString(s.jwtSecret)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to generate token: %w", err)
+		return nil, "", fmt.Errorf("sign token: %w", err)
 	}
-
-	return user, tokenString, nil
+	return user, signed, nil
 }
 
 func (s *authService) VerifyToken(tokenString string) (string, error) {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return s.jwtSecret, nil
-	})
-
+	token, err := jwt.Parse(tokenString, func(*jwt.Token) (any, error) { return s.jwtSecret, nil },
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithExpirationRequired(),
+	)
 	if err != nil || !token.Valid {
 		return "", errors.New("invalid token")
 	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return "", errors.New("invalid token claims")
+	sub, err := token.Claims.GetSubject()
+	if err != nil {
+		return "", errors.New("invalid token subject")
 	}
-
-	id, ok := claims["sub"].(string)
-	if !ok {
-		return "", errors.New("invalid token sub claim")
+	if _, err := primitive.ObjectIDFromHex(sub); err != nil {
+		return "", errors.New("invalid token subject")
 	}
-
-	return id, nil
+	return sub, nil
 }
 
 func (s *authService) GetUserByID(ctx context.Context, id string) (*model.User, error) {
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
-		return nil, errors.New("invalid user ID")
+		return nil, ErrNotFound
 	}
-	return s.repo.GetByID(ctx, objID)
+	user, err := s.repo.GetByID(ctx, objID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	return user, err
 }
-func (s *authService) UpdatePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
+
+func (s *authService) CheckPassword(ctx context.Context, userID, password string) error {
 	user, err := s.GetUserByID(ctx, userID)
 	if err != nil {
 		return err
 	}
-
-	// Verify old password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)); err != nil {
-		return errors.New("invalid current password")
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return ErrInvalidCredentials
 	}
+	return nil
+}
 
-	// Hash new password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+func (s *authService) UpdatePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
+	if err := s.CheckPassword(ctx, userID, oldPassword); err != nil {
+		return err
+	}
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
-		return fmt.Errorf("failed to hash password: %w", err)
+		return fmt.Errorf("hash password: %w", err)
 	}
-
-	// Update in repo
 	objID, _ := primitive.ObjectIDFromHex(userID)
-	return s.repo.UpdatePassword(ctx, objID, string(hashedPassword))
+	return s.repo.UpdatePassword(ctx, objID, string(hash))
 }

@@ -1,49 +1,58 @@
 package model
 
-import (
-	"time"
+import "slices"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
-)
-
-type LLMProvider string
-
-const (
-	ProviderOllama LLMProvider = "ollama"
-	ProviderOpenAI LLMProvider = "openai"
-	ProviderClaude LLMProvider = "claude"
-	ProviderCustom LLMProvider = "custom"
-)
-
+// LLMConfig describes a model from system_models.json.
 type LLMConfig struct {
-	ID            *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Provider      LLMProvider         `bson:"provider" json:"provider"`
-	Name          string              `bson:"name" json:"name"`
-	ModelName     string              `bson:"model_name" json:"model_name"`
-	BaseURL       string              `bson:"base_url,omitempty" json:"base_url,omitempty"`
-	Description   string              `bson:"description,omitempty" json:"description,omitempty"`
-	ContextWindow int                 `bson:"context_window" json:"context_window"`
-	
-	// Advanced Metadata
-	Architecture    string   `bson:"architecture,omitempty" json:"architecture,omitempty"`
-	ParametersCount string   `bson:"parameters_count,omitempty" json:"parameters_count,omitempty"`
-	EmbeddingLength int      `bson:"embedding_length,omitempty" json:"embedding_length,omitempty"`
-	Quantization    string   `bson:"quantization,omitempty" json:"quantization,omitempty"`
-	Capabilities    []string `bson:"capabilities,omitempty" json:"capabilities,omitempty"`
-	
-	// Default Parameters
-	Temperature   float64  `bson:"temperature,omitempty" json:"temperature,omitempty"`
-	TopK          int      `bson:"top_k,omitempty" json:"top_k,omitempty"`
-	TopP          float64  `bson:"top_p,omitempty" json:"top_p,omitempty"`
-	RepeatPenalty float64  `bson:"repeat_penalty,omitempty" json:"repeat_penalty,omitempty"`
-	StopSequences []string `bson:"stop_sequences,omitempty" json:"stop_sequences,omitempty"`
+	Name          string `json:"name"`
+	ModelName     string `json:"model_name"`
+	Description   string `json:"description,omitempty"`
+	ContextWindow int    `json:"context_window"`
 
-	CreatedAt     time.Time           `bson:"created_at" json:"created_at"`
-	UpdatedAt     time.Time           `bson:"updated_at" json:"updated_at"`
+	Architecture    string   `json:"architecture,omitempty"`
+	ParametersCount string   `json:"parameters_count,omitempty"`
+	EmbeddingLength int      `json:"embedding_length,omitempty"`
+	Quantization    string   `json:"quantization,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+
+	// Sampling defaults; nil means "use the model's own default".
+	Temperature   *float64 `json:"temperature,omitempty"`
+	TopK          *int     `json:"top_k,omitempty"`
+	TopP          *float64 `json:"top_p,omitempty"`
+	RepeatPenalty *float64 `json:"repeat_penalty,omitempty"`
+	StopSequences []string `json:"stop_sequences,omitempty"`
 }
 
-type LLMInfo struct {
-	Config   LLMConfig `json:"config"`
-	Status   string    `json:"status"` // "online", "offline"
-	IsSystem bool      `json:"is_system"`
+func (c *LLMConfig) Has(capability string) bool {
+	return slices.Contains(c.Capabilities, capability)
+}
+
+// NumCtx is the context size actually requested from Ollama: the model's
+// window, capped so the KV cache fits on consumer GPUs.
+func (c *LLMConfig) NumCtx(maxNumCtx int) int {
+	if c.ContextWindow <= 0 || c.ContextWindow > maxNumCtx {
+		return maxNumCtx
+	}
+	return c.ContextWindow
+}
+
+// Options builds the Ollama options for this model.
+func (c *LLMConfig) Options(maxNumCtx int) map[string]any {
+	opts := map[string]any{"num_ctx": c.NumCtx(maxNumCtx)}
+	if c.Temperature != nil {
+		opts["temperature"] = *c.Temperature
+	}
+	if c.TopK != nil {
+		opts["top_k"] = *c.TopK
+	}
+	if c.TopP != nil {
+		opts["top_p"] = *c.TopP
+	}
+	if c.RepeatPenalty != nil {
+		opts["repeat_penalty"] = *c.RepeatPenalty
+	}
+	if len(c.StopSequences) > 0 {
+		opts["stop"] = c.StopSequences
+	}
+	return opts
 }
